@@ -79,7 +79,12 @@ class Motor {
     // Lectura directa de la seta (NC: LOW = pulsada o cable cortado)
     // Se usa en TODAS las funciones que podrían arrancar el motor, para
     // garantizar que ninguna orden llegue al VFD si la seta no da señal.
-    bool setaPulsada() { return digitalRead(pinSeta) == LOW; }
+    bool setaPulsada() {
+      // Antes de la primera lectura HIGH (campo 24V no estabilizado),
+      // la seta se considera NO pulsada para no bloquear comandos.
+      if (!_setaValidada) return false;
+      return digitalRead(pinSeta) == LOW;
+    }
 
     // --- ENTRADAS EXTERNAS (botonera maestra del grupo) ---
     bool extBtnAbrir  = false;
@@ -146,6 +151,11 @@ class Motor {
     unsigned long lastFastBlinkTime = 0;      // parpadeo rápido (paso 3 calib)
     bool          fastBlinkState    = false;
     bool          enEmergencia    = false;
+    // Bandera de arranque: solo se puede entrar en EMERGENCIA si antes se
+    // vio la seta en HIGH (campo 24V presente y seta sin pulsar).
+    // Mientras false: el pin LOW al boot (optoacoplador sin tensión de campo)
+    // bloquea movimiento pero NO genera alarma de emergencia.
+    bool          _setaValidada   = false;
     bool          errorLimite     = false;
     unsigned long finCalibracionTime = 0;
     bool          mostrandoExito  = false;
@@ -434,9 +444,16 @@ class Motor {
     void gestionarEntradas() {
       // Seta de emergencia — prioridad absoluta
       if (digitalRead(pinSeta) == LOW) {
-        if (!enEmergencia) { debug(F("!!! EMERGENCIA !!!")); parar(); enEmergencia = true; }
+        if (_setaValidada) {
+          // Campo 24V estaba activo y seta pasó a LOW → emergencia real
+          if (!enEmergencia) { debug(F("!!! EMERGENCIA !!!")); parar(); enEmergencia = true; }
+        }
+        // Si _setaValidada==false: optoacoplador sin tensión de campo (boot
+        // transient). Bloqueamos movimiento (return) pero sin alarma.
         return;
       } else {
+        // Pin HIGH → campo 24V presente y seta no pulsada → sistema validado
+        _setaValidada = true;
         if (enEmergencia) {
           debug(F("Emergencia OFF."));
           enEmergencia = false;

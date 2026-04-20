@@ -147,15 +147,17 @@ class MqttHandler {
 
       if (now - lastPongTime > timeout) {
         if (esOrdenRemota) {
-          _grupoVigilado->parar();
+          // FreeRTOS: esta función corre en taskNetwork (prioridad baja).
+          // NO llamar _grupoVigilado->parar() directamente — sería un
+          // acceso concurrente a GrupoMotores sin protección de mutex.
+          // En su lugar, seteamos un flag volátil que taskMotor (prioridad
+          // alta) lee y ejecuta en su próximo ciclo de 5 ms.
+          extern volatile bool emergencyStopRequest;
+          emergencyStopRequest = true;
           debug(F("!!! SEGURIDAD: Timeout Heartbeat. PARADA DE EMERGENCIA !!!"));
         }
         if (client.connected()) {
           debug(F("Timeout PONG. Desconectando."));
-          // NOTA: setRetransmissionTimeout(5) usaba la fórmula 5*10/100 = 0
-          // (división entera), lo que ponía RTR=0 en el W5500 → timeout
-          // infinito. Eliminado por completo: usamos _safeDisconnect() que
-          // evita cualquier write TCP si no hay cable físico.
           _safeDisconnect();
         }
         lastPongTime = now;
@@ -175,6 +177,14 @@ class MqttHandler {
       _verbose = !_verbose;
       debug(_verbose ? F("Verbose ON") : F("Verbose OFF"));
       if (_verbose) imprimirDiagnostico();
+    }
+
+    // Fuerza un intento de reconexión inmediato (cancela backoff).
+    // Útil para diagnóstico desde serie: tecla 'R'.
+    void forzarReconexion() {
+      lastReconnectAttempt = 0;
+      _reconnectInterval   = 5000;
+      debug(F("Reconexion forzada. Proximo ciclo intentara conectar."));
     }
 
     void imprimirDiagnostico() {
@@ -274,13 +284,22 @@ class MqttHandler {
       // suficientes y seguros.
       client.setSocketTimeout(2);    // Máx. 2 s bloqueando en connect/read
       client.setKeepAlive(10);       // MQTT keepalive 10 s (default 15 s)
-      client.setBufferSize(512);     // Buffer RX/TX (default 256 bytes)
+      // NOTA: setBufferSize(512) eliminado — en AVR (Mega) el realloc de
+      // 256→512 bytes fragmenta el heap estándar justo cuando hay menos
+      // memoria libre (después de crear el Motor). El buffer por defecto
+      // de 256 bytes es suficiente para todos los topics y payloads usados.
 
       // Iniciar lastPongTime en el presente para que el watchdog no dispare
       // antes de tener siquiera oportunidad de conectarse
       lastPongTime = millis();
 
-      debug("Configurado. Broker: " + String(_server) + ":" + String(_port));
+      // Nota: externalLog aún no está configurado cuando setup() es llamado
+      // desde taskStartup (setLogger() se llama después). Usar Serial directo
+      // para evitar construir String con heap bajo en el momento de init.
+      Serial.print(F("[MQTT] Configurado. Broker: "));
+      Serial.print(_server);
+      Serial.print(':');
+      Serial.println(_port);
     }
 
     // --------------------------------------------------------
