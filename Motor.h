@@ -1132,13 +1132,14 @@ class Motor {
     }
 
     void imprimirEstado() {
-      String s = "Estado: " + getEstadoString() + " | Pos: " + String(getPorcentajeEntero()) + "% | Modo: ";
-      if (modoTiempo) {
-        s += "TIEMPO | Actual: " + String(getPosicionTiempoEstimada()) + " ms | Total: " + String(tiempoTotalRecorrido) + " ms";
-      } else {
-        s += "ENCODER | Actual: " + String(enc->read()) + " pulsos | Total: " + String(pulsos100) + " pulsos";
-      }
-      debug(s);
+      Serial.print(F("["));
+      Serial.print(id);
+      Serial.print(F("] Estado: "));
+      Serial.print(getEstadoString());
+      Serial.print(F(" | Pos: "));
+      Serial.print(getPorcentajeEntero());
+      Serial.print(F("% | Modo: "));
+      Serial.println(modoTiempo ? F("TIEMPO") : F("ENCODER"));
     }
 };
 

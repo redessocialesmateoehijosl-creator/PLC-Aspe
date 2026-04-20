@@ -248,10 +248,16 @@ class GrupoMotores {
     }*/
 
     void imprimirEstado() {
-      debug(F("--- ESTADO ---"));
-      debug("Consenso: " + getEstadoString() + " | Pos media: " + String(getPorcentajeEntero()) + "%");
+      // Usar Serial.print directo para evitar concatenaciones de String
+      // que fallan silenciosamente cuando el heap AVR está fragmentado.
+      Serial.println(F("--- ESTADO ---"));
+      Serial.print(F("Consenso: "));
+      Serial.print(getEstadoString());
+      Serial.print(F(" | Pos media: "));
+      Serial.print(getPorcentajeEntero());
+      Serial.println(F("%"));
       for (int i = 0; i < numMotores; i++) motores[i]->imprimirEstado();
-      debug(F("--------------"));
+      Serial.println(F("--------------"));
     }
 };
 
