@@ -66,6 +66,15 @@ class Red {
       _linkJustRecovered = false;
       _dhcpPendiente     = false;
 
+      // ── Limitar timeout TCP del W5500 ────────────────────────────────────
+      // Por defecto el W5500 usa RTR=200ms × RCR=8 retries, lo que hace que
+      // EthernetClient::write() y ::stop() bloqueen el loop hasta 30 segundos
+      // cuando el cable se desconecta (intentan enviar TCP y esperan ACKs).
+      // Con RTR=100ms × RCR=3, el peor caso de bloqueo es ~300ms,
+      // suficiente para red local y seguro para el loop de control.
+      Ethernet.setRetransmissionTimeout(100);  // 100 ms por reintento
+      Ethernet.setRetransmissionCount(3);       // máximo 3 reintentos
+
       Serial.print(F("[RED] IP: "));
       Serial.println(Ethernet.localIP());
       delay(500);
@@ -79,15 +88,15 @@ class Red {
       if (linkOK && !_lastLinkON) {
         // ── Cable reconectado ──────────────────────────────
         Serial.println(F("[RED] Cable reconectado."));
-        if (!_inhibirDHCP) {
-          _intentarDHCP("Cable reconectado.");
-          _dhcpPendiente = false;
-        } else {
-          // Motor en movimiento: diferir el DHCP para no bloquear el loop
-          Serial.println(F("[RED] Motor en movimiento. DHCP diferido."));
-          _dhcpPendiente = true;
-        }
-        _linkJustRecovered = true;   // MQTT reconectará aunque cambie la IP
+        // NO relanzar Ethernet.begin()/DHCP aquí: en varios builds de la
+        // librería Ethernet, begin() ignora el timeout y hace múltiples
+        // intentos DISCOVER internos, bloqueando el loop 4-5 segundos.
+        // En redes normales el router asigna la misma IP (lease DHCP activo).
+        // Si la IP cambió, el intento de reconexión MQTT fallará con estado
+        // -2 y lo reintentará; Ethernet.maintain() se encargará de renovar
+        // el lease en segundo plano sin bloquear (llamado en cada ciclo loop).
+        _dhcpPendiente = false;     // Cancelar cualquier DHCP pendiente previo
+        _linkJustRecovered = true;  // MQTT reconectará inmediatamente
 
       } else if (!linkOK && _lastLinkON) {
         Serial.println(F("[RED] !!! Cable Ethernet desconectado !!!"));
@@ -95,13 +104,11 @@ class Red {
 
       _lastLinkON = linkOK;
 
-      // ── DHCP diferido: reintentar cuando el motor ya esté parado ──
-      if (_dhcpPendiente && !_inhibirDHCP && linkOK) {
-        Serial.println(F("[RED] Ejecutando DHCP diferido."));
-        _intentarDHCP("DHCP diferido.");
-        _dhcpPendiente     = false;
-        _linkJustRecovered = true;   // fuerza reconexión MQTT con posible nueva IP
-      }
+      // ── DHCP diferido: desactivado ────────────────────────────────
+      // Ya no se relanza DHCP en reconexión de cable (ver comentario arriba).
+      // _dhcpPendiente siempre estará en false; bloque conservado por si se
+      // reactiva en el futuro.
+      // if (_dhcpPendiente && !_inhibirDHCP && linkOK) { ... }
 
       // ── Mantener concesión DHCP ───────────────────────────────────
       // Ethernet.maintain() puede bloquear unos ms al renovar el lease.

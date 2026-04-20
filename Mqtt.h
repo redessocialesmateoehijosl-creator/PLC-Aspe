@@ -14,6 +14,7 @@
 
 #include <Ethernet.h>
 #include <PubSubClient.h>   // Instalar desde Gestor de Librerías
+#include <utility/w5100.h>  // Acceso directo al chip W5500: Sock_CLOSE instantáneo
 #include "Constantes.h"
 #include "GrupoMotores.h"
 #include "Red.h"
@@ -72,6 +73,45 @@ class MqttHandler {
     }
 
     // --------------------------------------------------------
+    //  Cierre de socket seguro (sin bloqueo aunque no haya cable)
+    //
+    //  client.disconnect() envía un paquete TCP DISCONNECT y luego
+    //  llama a ethClient.stop(), que espera el cierre de la conexión
+    //  TCP. Sin cable, el W5500 reintenta hasta agotar RTR×RCR, lo
+    //  que puede bloquear el loop varios segundos.
+    //
+    //  Solución: si no hay cable físico, cerramos el socket W5500
+    //  directamente con ethClient.stop() sin pasar por la librería
+    //  MQTT (que intentaría escribir TCP primero).
+    //  PubSubClient detectará la desconexión en el siguiente loop()
+    //  porque ethClient.connected() devolverá false.
+    // --------------------------------------------------------
+    void _safeDisconnect() {
+      if (!Red::linkOK()) {
+        // Sin cable: ethClient.stop() tiene un bucle hardcodeado de 1000ms:
+        //   while (status() != SnSR::CLOSED && millis()-start < 1000)
+        // El socket se queda en FIN_WAIT (no pasa a CLOSED) porque el ACK
+        // del FIN nunca llega → espera 1 segundo completo.
+        //
+        // Solución: usar Sock_CLOSE directamente vía W5100.execCmdSn().
+        // Sock_CLOSE ≠ Sock_DISCON: cierra el socket de forma instantánea
+        // sin enviar ningún paquete TCP, sin esperar ACKs, sin bucle.
+        // PubSubClient detectará la desconexión en el siguiente ciclo porque
+        // ethClient.connected() consultará el estado del socket (CLOSED) y
+        // devolverá false.
+        for (int s = 0; s < MAX_SOCK_NUM; s++) {
+          if (W5100.readSnSR(s) != SnSR::CLOSED) {
+            W5100.execCmdSn(s, Sock_CLOSE);
+          }
+        }
+        debug(F("Socket cerrado (Sock_CLOSE directo). Bloqueo: 0 ms."));
+      } else {
+        // Con cable: desconexión MQTT limpia (envía paquete DISCONNECT)
+        client.disconnect();
+      }
+    }
+
+    // --------------------------------------------------------
     //  Heartbeat / Watchdog de conexión
     // --------------------------------------------------------
     void enviarPing() {
@@ -93,11 +133,15 @@ class MqttHandler {
 
       if (now - lastPingTime > intervalo) {
         lastPingTime = now;
-        if (client.connected()) {
+        // Guardia de cable: client.publish() llama a EthernetClient::write(),
+        // que puede bloquear el loop varios segundos si el cable está caído
+        // (el W5500 intenta enviar TCP y espera ACKs que nunca llegan).
+        // Si no hay cable físico, no tiene sentido intentar publicar.
+        if (client.connected() && Red::linkOK()) {
           client.publish(MQTT_TOPIC_PING, "1");
           vlog("PING >> " + String(MQTT_TOPIC_PING));
         } else {
-          vlog(F("PING omitido: sin conexion"));
+          vlog(F("PING omitido: sin conexion o sin cable"));
         }
       }
 
@@ -108,7 +152,11 @@ class MqttHandler {
         }
         if (client.connected()) {
           debug(F("Timeout PONG. Desconectando."));
-          client.disconnect();
+          // NOTA: setRetransmissionTimeout(5) usaba la fórmula 5*10/100 = 0
+          // (división entera), lo que ponía RTR=0 en el W5500 → timeout
+          // infinito. Eliminado por completo: usamos _safeDisconnect() que
+          // evita cualquier write TCP si no hay cable físico.
+          _safeDisconnect();
         }
         lastPongTime = now;
       }
@@ -302,7 +350,17 @@ class MqttHandler {
           }
         }
       } else {
-        client.loop();
+        // client.loop() envía MQTT PINGREQ cada keepalive segundos.
+        // Si el cable se ha ido pero TCP aún cree que está conectado,
+        // ese write bloquea el loop hasta agotar los reintentos W5500.
+        // Solución: si no hay cable físico, forzar cierre sin bloqueo
+        // en lugar de llamar a client.loop().
+        if (!Red::linkOK()) {
+          debug(F("Cable ausente con sesion activa. Forzando cierre de socket."));
+          _safeDisconnect();
+        } else {
+          client.loop();
+        }
         vigilarGrupo();
       }
       enviarPing();
@@ -340,11 +398,16 @@ class MqttHandler {
     }
 
     void publish(String msg) {
-      if (client.connected()) {
+      // Doble guarda: client.connected() NO es suficiente cuando el cable
+      // acaba de caerse — TCP puede creer que sigue conectado mientras el
+      // W5500 todavía no ha detectado el timeout. Red::linkOK() comprueba
+      // el pin físico de link del W5500 (Ethernet.linkStatus()) y evita
+      // que client.publish() intente un write TCP que bloquearía el loop.
+      if (client.connected() && Red::linkOK()) {
         client.publish(_topicOut, msg.c_str());
         vlog(">> TX [" + String(_topicOut) + "] \"" + msg + "\"");
       } else {
-        vlog(">> TX omitido (sin conexion): \"" + msg + "\"");
+        vlog(">> TX omitido (sin conexion o sin cable): \"" + msg + "\"");
       }
     }
 

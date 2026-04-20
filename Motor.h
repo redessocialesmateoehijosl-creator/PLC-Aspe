@@ -604,10 +604,13 @@ class Motor {
     // ============================================================
     void update() {
       // --- SEGURIDAD REDUNDANTE: la seta manda SIEMPRE ---
-      // Si la seta está LOW (pulsada o cable cortado), cortamos el VFD
-      // inmediatamente en cada iteración, sin depender del flag software.
+      // Si la seta está LOW (pulsada o cable cortado), cortamos el VFD.
+      // vfdParar() solo se llama en el PRIMER ciclo de detección (!enEmergencia),
+      // porque el mecanismo _stopPendiente de VFDController ya garantiza que el
+      // STOP llegará al variador en cuanto el bus quede libre. Llamarlo en cada
+      // iteración solo generaría spam de "STOP encolado" en el log.
       if (setaPulsada()) {
-        vfdParar();
+        if (!enEmergencia) vfdParar();   // flanco: solo en la primera detección
         if (motorEnMovimiento) {
           motorEnMovimiento  = false;
           moviendoAutomatico = false;
@@ -819,7 +822,10 @@ class Motor {
         ultimoObjetivoPulsosDebug = 0;
         requestMqttUpdate = true;
       }
-      if (esRemoto) movimientoPorRed = true;   // solo activa watchdog si la orden es remota
+      // Orden remota → activa watchdog heartbeat.
+      // Orden local (botón) → limpia el flag aunque antes hubiera una orden remota:
+      // si el operador toma el control desde el cuadro, la red ya no manda.
+      movimientoPorRed = esRemoto;
     }
 
     void abrirManual() {
@@ -827,6 +833,7 @@ class Motor {
       if (enEmergencia || errorVFD) return;
       if (!motorEnMovimiento || sentidoGiro != 1) {
         moviendoAutomatico = false;
+        movimientoPorRed   = false;          // botón toma el control: desactiva watchdog red
         porcUltimoObjetivoAuto = -1;        // manual: no hay "destino auto"
 
         ultimoObjetivoPctDebug = -1;
@@ -843,6 +850,7 @@ class Motor {
       if (enEmergencia || errorVFD) return;
       if (!motorEnMovimiento || sentidoGiro != -1) {
         moviendoAutomatico = false;
+        movimientoPorRed   = false;          // botón toma el control: desactiva watchdog red
         porcUltimoObjetivoAuto = -1;        // manual: no hay "destino auto"
 
         ultimoObjetivoPctDebug = -1;
