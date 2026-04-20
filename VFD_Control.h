@@ -16,11 +16,33 @@ class VFDController {
     void debug(String msg) { if (_log) _log("[VFD] " + msg); }
     void vlog(String msg)  { if (_verbose && _log) _log("[VFD] " + msg); }
 
+    // Envío directo del comando STOP (bus debe estar libre antes de llamar)
+    void _enviarStopAhora() {
+      _stopPendiente    = false;
+      _esperandoLectura = false;   // es un write (FC06), no una lectura
+      _esHeartbeat      = false;
+      vlog(F(">> TX FC06 REG_CONTROL=0x0001 (STOP)"));
+      _master.writeSingleRegister(SLAVE_ID, REG_CONTROL, CMD_STOP);
+      _ultimaComunicacion = millis();
+    }
+
     // --- ESTADO RESPUESTAS ---
     bool          _esperandoLectura   = false;
     bool          _esHeartbeat        = false;
     unsigned long _ultimaComunicacion = 0;
     static const unsigned long INTERVALO_HEARTBEAT = 4000UL; // 4s (VFD timeout P6.02 = 10s)
+
+    // Cola de prioridad para STOP:
+    // Si parar() se llama con el bus Modbus ocupado, el comando se
+    // encola aquí y se despacha en el próximo ciclo de update() en
+    // cuanto el bus quede libre. Garantiza que un stop de seguridad
+    // nunca se pierda por un heartbeat o lectura en curso.
+    bool          _stopPendiente      = false;
+
+    // --- FEEDBACK ESTADO MOTOR (último parse válido de 2101H) ---
+    bool          _motorGirandoUlt       = false;  // Bit12 "En funcionamiento"
+    bool          _motorApagadoUlt       = false;  // Bit1  "Apagado"
+    unsigned long _tsUltimaLecturaEstado = 0;      // millis() del último parse OK
 
   public:
     VFDController(ModbusRTUMaster& master) : _master(master) {}
@@ -33,6 +55,15 @@ class VFDController {
     }
 
     bool isBusy() { return _master.isWaitingResponse(); }
+
+    // --- ACCESORES DE ESTADO (última lectura 2101H válida) -------------
+    //  motorGirando()   → true si el variador reportó Bit12="En funcionamiento"
+    //  motorApagado()   → true si el variador reportó Bit1="Apagado"
+    //  estadoFresco(ms) → true si la última lectura válida es más reciente que 'ms'
+    bool motorGirando()                   { return _motorGirandoUlt; }
+    bool motorApagado()                   { return _motorApagadoUlt; }
+    bool estadoFresco(unsigned long ms)   { return (millis() - _tsUltimaLecturaEstado) < ms; }
+    unsigned long msDesdeUltimaLectura()  { return millis() - _tsUltimaLecturaEstado; }
 
     // --- COMANDOS (comprueban bus libre antes de enviar) ---
     void marchaAdelante() {
@@ -50,10 +81,12 @@ class VFDController {
     }
 
     void parar() {
-      if (isBusy()) { vlog(F("Bus ocupado, ignorando parar")); return; }
-      vlog(F(">> TX FC06 REG_CONTROL=0x0001 (STOP)"));
-      _master.writeSingleRegister(SLAVE_ID, REG_CONTROL, CMD_STOP);
-      _ultimaComunicacion = millis();
+      _stopPendiente = true;   // marca siempre, incluso si el bus está ocupado
+      if (isBusy()) {
+        vlog(F("Bus ocupado. STOP encolado: se enviara en el proximo ciclo libre."));
+        return;
+      }
+      _enviarStopAhora();
     }
 
     void resetErrores() {
@@ -85,6 +118,16 @@ class VFDController {
     //  Gestiona heartbeat keep-alive + procesado de respuestas
     // --------------------------------------------------------
     void update() {
+
+      // ── PRIORIDAD MÁXIMA: STOP encolado ──────────────────────────────
+      // Si parar() fue llamado mientras el bus estaba ocupado, enviamos
+      // el STOP en cuanto el bus queda libre, ANTES que cualquier otra
+      // operación (heartbeat, lectura de estado…).
+      if (_stopPendiente && !isBusy()) {
+        vlog(F(">> [COLA] Enviando STOP prioritario encolado."));   // vlog: solo en verbose
+        _enviarStopAhora();
+        return;   // procesar la respuesta en el próximo ciclo
+      }
 
       // Heartbeat: lectura silenciosa cada 4s para evitar error E485
       if (!isBusy() && (millis() - _ultimaComunicacion >= INTERVALO_HEARTBEAT)) {
@@ -127,6 +170,12 @@ class VFDController {
           bool canalModbus  = (statusReg & 0x0400);
 
           bool enMovimiento = (bool)enMarcha;
+
+          // Exponer estado para consulta externa (Motor::update() lo necesita
+          // para confirmar que una parada real ya se ha producido).
+          _motorGirandoUlt       = enMovimiento;
+          _motorApagadoUlt       = apagado;
+          _tsUltimaLecturaEstado = millis();
 
           uint16_t faultCode = (!enMovimiento && statusReg >= 1 && statusReg <= 17)
                                ? statusReg : 0;

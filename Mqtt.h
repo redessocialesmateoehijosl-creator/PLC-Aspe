@@ -221,7 +221,10 @@ class MqttHandler {
       // ---- Ajustes críticos de robustez (requiere PubSubClient >= 2.8) ----
       // Sin setSocketTimeout, connect() puede bloquear el loop 15 s si el
       // broker no responde → el VFD pierde heartbeat y el encoder pierde pulsos.
-      client.setSocketTimeout(4);    // Máx. 4 s bloqueando en connect/read
+      // Reducido de 4 s a 2 s: limita el peor caso a la mitad. El reconexión
+      // está protegida para no ejecutarse durante movimiento, así que 2 s son
+      // suficientes y seguros.
+      client.setSocketTimeout(2);    // Máx. 2 s bloqueando en connect/read
       client.setKeepAlive(10);       // MQTT keepalive 10 s (default 15 s)
       client.setBufferSize(512);     // Buffer RX/TX (default 256 bytes)
 

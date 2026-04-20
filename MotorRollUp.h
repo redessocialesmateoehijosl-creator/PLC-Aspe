@@ -67,6 +67,10 @@ class MotorRollUp {
       if (externalLog) externalLog("[" + id + "] " + msg);
     }
 
+    // Lectura directa de la seta (NC: LOW = pulsada o cable cortado).
+    // Se usa en TODAS las entradas que podrían arrancar el motor.
+    bool setaPulsada() { return digitalRead(pinSeta) == LOW; }
+
 
     // ==========================================
     //   LÓGICA PRINCIPAL DEL MOTOR
@@ -354,6 +358,7 @@ class MotorRollUp {
     //   COMANDOS PÚBLICOS
     // ==========================================
     void subir() {
+      if (setaPulsada()) { debug("Rechazado: SETA pulsada."); return; }
       if (estaArriba) { debug("Ya esta ARRIBA."); requestMqttUpdate = true; return; }
       debug("CMD: subir");
       cmdSubir = true;
@@ -361,6 +366,7 @@ class MotorRollUp {
     }
 
     void bajar() {
+      if (setaPulsada()) { debug("Rechazado: SETA pulsada."); return; }
       if (estaAbajo) { debug("Ya esta ABAJO."); requestMqttUpdate = true; return; }
       debug("CMD: bajar");
       cmdBajar = true;
@@ -382,6 +388,17 @@ class MotorRollUp {
     //   LOOP PRINCIPAL
     // ==========================================
     void update() {
+      // --- SEGURIDAD REDUNDANTE: la seta manda SIEMPRE ---
+      // Si la seta está LOW (pulsada o cable cortado), forzamos relés a LOW
+      // y limpiamos latches ANTES de cualquier otra lógica.
+      if (setaPulsada()) {
+        digitalWrite(pinMotorArriba, LOW);
+        digitalWrite(pinMotorAbajo,  LOW);
+        motorSubiendo = false;
+        motorBajando  = false;
+        cmdSubir      = false;
+        cmdBajar      = false;
+      }
       gestionarMotor();
       gestionarLeds();
     }

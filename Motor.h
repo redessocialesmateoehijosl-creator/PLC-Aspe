@@ -75,6 +75,11 @@ class Motor {
     void vfdAtras()    { if (vfd) vfd->marchaAtras();    }
     void vfdParar()    { if (vfd) vfd->parar();          }
 
+    // Lectura directa de la seta (NC: LOW = pulsada o cable cortado)
+    // Se usa en TODAS las funciones que podrían arrancar el motor, para
+    // garantizar que ninguna orden llegue al VFD si la seta no da señal.
+    bool setaPulsada() { return digitalRead(pinSeta) == LOW; }
+
     // --- ENTRADAS EXTERNAS (botonera maestra del grupo) ---
     bool extBtnAbrir  = false;
     bool extBtnCerrar = false;
@@ -100,6 +105,14 @@ class Motor {
     unsigned long posicionActualTiempo = 0;
     unsigned long tiempoInicioMovimiento = 0;
 
+    // Último objetivo de un movimiento AUTOMÁTICO (0..100) o -1 si la última
+    // orden fue manual. Se usa en getEstadoString() para decidir si, al
+    // parar, estamos "en el extremo" aunque el encoder no haya tocado
+    // exactamente pulsos100 (por freno anticipado + inercia).
+    int porcUltimoObjetivoAuto = -1;
+    int  ultimoObjetivoPctDebug = -1;
+    long ultimoObjetivoPulsosDebug = 0;
+
     // Anticipación (freno anticipado)
     long pulsosAnticipacion = 50;
 
@@ -121,21 +134,47 @@ class Motor {
     bool lastBtnCalib  = false;
     int  pasoCalibracion = 0;
 
+    // Long-press / cancelación de calibración
+    unsigned long tiempoBtnCalibPressed = 0;
+    bool          cancelPendiente       = false;
+    static const unsigned long UMBRAL_LONG_PRESS = 2000; // 2 s para cancelar
+
     // Luces
-    unsigned long lastBlinkTime   = 0;
-    bool          blinkState      = false;
+    unsigned long lastBlinkTime     = 0;      // parpadeo normal / lento
+    bool          blinkState        = false;
+    unsigned long lastFastBlinkTime = 0;      // parpadeo rápido (paso 3 calib)
+    bool          fastBlinkState    = false;
     bool          enEmergencia    = false;
     bool          errorLimite     = false;
     unsigned long finCalibracionTime = 0;
     bool          mostrandoExito  = false;
+    // Indicación visual breve al cancelar calibración (LED rojo parpadeando)
+    bool          mostrandoCancel = false;
+    unsigned long tiempoCancel    = 0;
+
+    // Cadencias de parpadeo (ms entre flancos)
+    static const unsigned long BLINK_LENTO  = 400;
+    static const unsigned long BLINK_RAPIDO = 120;
 
     bool movimientoPorRed = false;
 
-    // Inercia / parada real
+    // Inercia / parada real (confirmación por encoder — solo modo encoder)
     bool          esperandoParadaReal = false;
     long          lastEncValStop      = 0;
     unsigned long lastEncTimeStop     = 0;
     const int TIEMPO_ESTABILIZACION   = 300;
+    long          pulsosAlMandarStop  = 0;
+
+    // Confirmación de parada REAL (encoder + VFD).
+    // Entre parar() y la confirmación, getEstadoString() sigue devolviendo
+    // "abriendo"/"cerrando" y el requestMqttUpdate queda pendiente,
+    // para que MQTT no publique "stopped" durante la deceleración.
+    bool          confirmandoParada        = false;
+    unsigned long inicioConfirmacionParada = 0;
+    unsigned long ultimaSolicitudVFD       = 0;
+    bool          vfdReporteParado         = false;
+    static const unsigned long INTERVALO_POLL_VFD     = 250;   // ms entre lecturas 2101H
+    static const unsigned long TIMEOUT_CONFIRM_PARADA = 5000;  // ms máx. esperando confirmación
 
     // Watchdog encoder (atasco)
     bool          errorAtasco       = false;
@@ -143,6 +182,17 @@ class Motor {
     unsigned long lastMoveTime      = 0;
     const int TIEMPO_GRACIA_ARRANQUE = 1000;
     const int TIEMPO_MAX_SIN_PULSOS  = 1500;
+
+    // Detector de ruido encoder (ESD / glitch eléctrico)
+    // Cuando el motor está completamente parado, el encoder no debería
+    // cambiar. Si salta más de MAX_SALTO_PARADO pulsos en un solo ciclo
+    // de loop, es un glitch (ESD al conectar/desconectar cables, ruido
+    // en las líneas de interrupción). En ese caso se restaura la última
+    // posición válida y se loguea, evitando que el sistema intente mover
+    // el motor hacia una posición absurda.
+    long          _encPosValida     = 0;    // última posición confirmada con motor parado
+    bool          _encPosValidaOK   = false; // false hasta el primer ciclo de reposo
+    static const long MAX_SALTO_PARADO = 30; // pulsos; imposible mecánicamente en reposo
 
     // --- LOGGER ---
     // En Mega no hay std::function — usamos puntero de función simple
@@ -201,6 +251,44 @@ class Motor {
     }
 
     // ============================================================
+    //  DETECTOR DE RUIDO EN ENCODER  (ESD / glitch eléctrico)
+    //
+    //  Llamar SOLO cuando el motor está completamente parado y no
+    //  hay ninguna fase de frenado activa. Si el encoder salta más de
+    //  MAX_SALTO_PARADO pulsos en un ciclo, es imposible mecánicamente
+    //  → descarga ESD o ruido en el cableado. Se restaura la posición.
+    // ============================================================
+    void detectarRuidoEncoder() {
+      // Solo actúa cuando el motor está en reposo total
+      if (motorEnMovimiento || calibrando || esperandoParadaReal || confirmandoParada) {
+        // Motor en movimiento o frenando: actualizar referencia continuamente
+        _encPosValida  = enc->read();
+        _encPosValidaOK = true;
+        return;
+      }
+      if (modoTiempo) return;   // en modo tiempo no se usa el encoder para posición
+
+      long posActual = enc->read();
+
+      if (!_encPosValidaOK) {
+        // Primera vez que entramos en reposo: fijar la referencia
+        _encPosValida  = posActual;
+        _encPosValidaOK = true;
+        return;
+      }
+
+      long salto = abs(posActual - _encPosValida);
+      if (salto > MAX_SALTO_PARADO) {
+        debug("!! RUIDO ENCODER (ESD?): salto de " + String(salto) +
+              " pulsos en reposo. Restaurando pos " + String(_encPosValida) + ".");
+        enc->write(_encPosValida);   // restaurar última posición válida
+        // NO ponemos errorAtasco: el sistema sigue operativo con la posición corregida
+      } else {
+        _encPosValida = posActual;   // posición estable → actualizar referencia
+      }
+    }
+
+    // ============================================================
     //  WATCHDOG DE ENCODER  (atasco / rotura)
     // ============================================================
     void verificarAtasco() {
@@ -235,7 +323,8 @@ class Motor {
     // ============================================================
     void gestionarLuces() {
       unsigned long now = millis();
-      if (now - lastBlinkTime > 300) { blinkState = !blinkState; lastBlinkTime = now; }
+      if (now - lastBlinkTime     > BLINK_LENTO)  { blinkState     = !blinkState;     lastBlinkTime     = now; }
+      if (now - lastFastBlinkTime > BLINK_RAPIDO) { fastBlinkState = !fastBlinkState; lastFastBlinkTime = now; }
 
       if (enEmergencia || errorLimite || errorAtasco) {
         digitalWrite(pinRojo, blinkState); digitalWrite(pinVerde, LOW); digitalWrite(pinNaranja, LOW); return;
@@ -247,8 +336,12 @@ class Motor {
         return;
       }
       if (calibrando) {
-        if (pasoCalibracion == 2) digitalWrite(pinNaranja, HIGH);
-        else                      digitalWrite(pinNaranja, blinkState);
+        // Paso 1 → parpadeo lento  (buscando el 0%, "cerrado")
+        // Paso 2 → fijo            (0% marcado, buscando el 100%, "abierto")
+        // Paso 3 → parpadeo rápido (100% marcado, esperando salir de calibración)
+        if      (pasoCalibracion == 2) digitalWrite(pinNaranja, HIGH);
+        else if (pasoCalibracion == 3) digitalWrite(pinNaranja, fastBlinkState);
+        else                           digitalWrite(pinNaranja, blinkState);
         digitalWrite(pinRojo, LOW); digitalWrite(pinVerde, LOW); return;
       }
       if (motorEnMovimiento) {
@@ -268,7 +361,7 @@ class Motor {
     // ============================================================
     void gestionarEntradas() {
       // Seta de emergencia — prioridad absoluta
-      if (/*digitalRead(pinSeta) == LOW*/false) {
+      if (digitalRead(pinSeta) == LOW) {
         if (!enEmergencia) { debug(F("!!! EMERGENCIA !!!")); parar(); enEmergencia = true; }
         return;
       } else {
@@ -287,11 +380,16 @@ class Motor {
       bool btnC   = digitalRead(pinBtnCerrar) || extBtnCerrar;
       bool btnCal = digitalRead(pinBtnCalib)  || extBtnCalib;
 
-      // Botón calibrar (flanco ascendente)
+      // Botón calibrar (flanco ascendente) — flujo de 4 pulsaciones:
+      //   1ª pulsación (paso 0): entrar en calibración  → paso 1
+      //   2ª pulsación (paso 1): marcar 0% ("cerrado")  → paso 2
+      //   3ª pulsación (paso 2): marcar 100% ("abierto")→ paso 3
+      //   4ª pulsación (paso 3): salir y guardar        → paso 0
       if (btnCal && !lastBtnCalib) {
-        if      (pasoCalibracion == 0) { debug(F(">> Calibrar...")); calibrar(); }
-        else if (pasoCalibracion == 1) { debug(F(">> Set 0..."));    setZero();  }
-        else if (pasoCalibracion == 2) { debug(F(">> Set 100...")); set100(); finCalibrado(); }
+        if      (pasoCalibracion == 0) { debug(F(">> Calibrar..."));    calibrar();     }
+        else if (pasoCalibracion == 1) { debug(F(">> Set 0..."));       setZero();      }
+        else if (pasoCalibracion == 2) { debug(F(">> Set 100..."));     set100();       }
+        else if (pasoCalibracion == 3) { debug(F(">> Fin calibracion"));finCalibrado(); }
       }
       lastBtnCalib = btnCal;
 
@@ -408,6 +506,9 @@ class Motor {
       tiempoTotalRecorrido = 0;  eepPutULong(EEP_TIMETOTAL, 0UL);
       posicionActualTiempo = 0;  eepPutULong(EEP_POSTIME,   0UL);
       enc->write(0L);            eepPutLong(EEP_POSENC,     0L);
+      porcUltimoObjetivoAuto = -1;
+      ultimoObjetivoPctDebug = -1;
+      ultimoObjetivoPulsosDebug = 0;
       debug(F("CAMBIO DE MODO: Memoria reseteada. Sistema NO CALIBRADO."));
     }
 
@@ -421,14 +522,33 @@ class Motor {
     //  UPDATE  (llamar cada ciclo de loop)
     // ============================================================
     void update() {
+      // --- SEGURIDAD REDUNDANTE: la seta manda SIEMPRE ---
+      // Si la seta está LOW (pulsada o cable cortado), cortamos el VFD
+      // inmediatamente en cada iteración, sin depender del flag software.
+      if (setaPulsada()) {
+        vfdParar();
+        if (motorEnMovimiento) {
+          motorEnMovimiento  = false;
+          moviendoAutomatico = false;
+          manualLatch        = false;
+        }
+      }
+
       gestionarLuces();
       gestionarEntradas();
+      detectarRuidoEncoder();   // filtra glitches ESD antes de que lleguen a la lógica
       verificarAtasco();
 
       // Esperar a que el motor se frene de verdad antes de guardar posición
       if (esperandoParadaReal && !modoTiempo) {
         long lecturaActual = enc->read();
         if (lecturaActual != lastEncValStop) {
+          // El motor SIGUE moviéndose tras haber mandado parar.
+          // Causa típica: la 1ª orden vfdParar() se perdió porque el bus
+          // Modbus estaba ocupado (heartbeat o lectura de estado).
+          // Reinsistimos en cada iteración: isBusy() filtra; el comando
+          // acaba llegando al variador en cuanto se libere el bus.
+          vfdParar();
           lastEncValStop   = lecturaActual;
           lastEncTimeStop  = millis();
         } else {
@@ -436,7 +556,71 @@ class Motor {
             eepPutLong(EEP_POSENC, lecturaActual);
             esperandoParadaReal = false;
             debug(">> Motor FRENADO. Pos guardada: " + String(lecturaActual));
+            // Fijar referencia antiruido: a partir de aquí el motor está parado
+            // y cualquier cambio brusco en el encoder será un glitch ESD.
+            _encPosValida  = lecturaActual;
+            _encPosValidaOK = true;
+
+            // --- CÁLCULO ---
+            long inercia = abs(lecturaActual - pulsosAlMandarStop);
+            debug(">> [DEBUG INERCIA] Motor FRENADO REAL. Pos final: " + String(lecturaActual) + " | Inercia total: " + String(inercia) + " pulsos.");
+            // ----------------------------------
+
+             // --- DEBUG OBJETIVO vs REAL ---
+            if (ultimoObjetivoPctDebug >= 0) {
+              long errorPulsos = lecturaActual - ultimoObjetivoPulsosDebug;
+              debug(">> [DEBUG OBJETIVO] Objetivo: " + String(ultimoObjetivoPctDebug) +
+                    "% | Pulsos teoricos: " + String(ultimoObjetivoPulsosDebug) +
+                    " | Pulsos reales: " + String(lecturaActual) +
+                    " | Error: " + String(errorPulsos) + " pulsos");
+            }
+
+            if (ultimoObjetivoPctDebug >= 0 && pulsos100 != 0) {
+              float pctReal = (100.0f * (float)lecturaActual) / (float)pulsos100;
+              float pctError = pctReal - (float)ultimoObjetivoPctDebug;
+
+              debug(">> [DEBUG PORCENTAJE] Objetivo: " + String(ultimoObjetivoPctDebug) +
+                    "% | Real: " + String(pctReal, 2) +
+                    "% | Error: " + String(pctError, 2) + "%");
+            }
+
+
           }
+        }
+      }
+
+      // --- Confirmación de parada REAL ---------------------------------
+      // Tras parar(), no publicamos "stopped" hasta que encoder Y VFD
+      // confirman que el motor ya no gira. Sin esto, MQTT publica el
+      // estado final mientras el motor aún está decelerando (resultado:
+      // "stopped" en vez de "opened"/"closed" si pararon en el extremo).
+      if (confirmandoParada) {
+        unsigned long now = millis();
+
+        // Polling activo al VFD (2101H) — más agresivo que el heartbeat
+        if (vfd && (now - ultimaSolicitudVFD > INTERVALO_POLL_VFD)) {
+          if (vfd->actualizar()) ultimaSolicitudVFD = now;
+          // Si isBusy, lo reintentaremos en la siguiente iteración
+        }
+
+        // El variador confirma parada vía 2101H (Bit12="En funcionamiento"=0)
+        if (vfd && !vfd->motorGirando()) vfdReporteParado = true;
+
+        // Encoder: en modo tiempo no hay feedback de encoder → damos OK.
+        bool encoderOK = modoTiempo || !esperandoParadaReal;
+        // VFD: si no hay VFD asignado, no podemos comprobar → damos OK.
+        bool vfdOK     = (vfd == nullptr) || vfdReporteParado;
+
+        if (encoderOK && vfdOK) {
+          confirmandoParada = false;
+          requestMqttUpdate = true;
+          debug(F(">> Parada CONFIRMADA (encoder + VFD). Publicando estado."));
+        } else if (now - inicioConfirmacionParada > TIMEOUT_CONFIRM_PARADA) {
+          confirmandoParada = false;
+          requestMqttUpdate = true;
+          debug("!! TIMEOUT confirmacion parada (" +
+                String(encoderOK ? "enc OK" : "enc NO") + ", " +
+                String(vfdOK     ? "vfd OK" : "vfd NO") + "). Publicando igualmente.");
         }
       }
 
@@ -465,6 +649,8 @@ class Motor {
     void abrir() {
       movimientoPorRed = true;
       esperandoParadaReal = false;
+      confirmandoParada = false;
+      if (setaPulsada()) { if (motorEnMovimiento) parar(); return; }
       if (enEmergencia || errorLimite) return;
 
       if (calibrando) {
@@ -480,6 +666,7 @@ class Motor {
           debug(F(">> Ignorado: Ya ABIERTO.")); requestMqttUpdate = true; return;
         }
         tiempoInicioMovimiento = millis(); moviendoAutomatico = true;
+        porcUltimoObjetivoAuto = 100;
       }
 
       // Abrir: adelante normal, atrás si invertido
@@ -490,6 +677,8 @@ class Motor {
     void cerrar() {
       movimientoPorRed = true;
       esperandoParadaReal = false;
+      confirmandoParada = false;
+      if (setaPulsada()) { if (motorEnMovimiento) parar(); return; }
       if (enEmergencia || errorLimite) return;
 
       if (calibrando) {
@@ -505,6 +694,7 @@ class Motor {
           debug(F(">> Ignorado: Ya CERRADO.")); requestMqttUpdate = true; return;
         }
         tiempoInicioMovimiento = millis(); moviendoAutomatico = true;
+        porcUltimoObjetivoAuto = 0;
       }
 
       // Cerrar: atrás normal, adelante si invertido
@@ -512,16 +702,28 @@ class Motor {
       motorEnMovimiento = true; sentidoGiro = -1;
     }
 
-    void moverA(int porcentaje) {
+    // esRemoto=true  → orden venida de la red (MQTT/m<N>): activa watchdog heartbeat
+    // esRemoto=false → orden local (botón físico):          NO activa watchdog
+    void moverA(int porcentaje, bool esRemoto = false) {
       esperandoParadaReal = false;
+      confirmandoParada = false;
+      if (setaPulsada()) {
+        if (motorEnMovimiento) parar();
+        debug(F("moverA rechazado (SETA pulsada).")); return;
+      }
       if (modoTiempo || calibrando || enEmergencia || errorLimite || errorAtasco) {
         debug(F("moverA rechazado (Error o Estado).")); return;
       }
       long porcentajeLim = constrain((long)porcentaje, 0L, 100L);
       pulsosObjetivo = (pulsos100 * porcentajeLim) / 100L;
-      long pulsosActuales = enc->read();
-      debug("Auto a " + String(porcentajeLim) + "%");
+      porcUltimoObjetivoAuto = (int)porcentajeLim;
 
+      // Guardar referencia teórica para debug final
+      ultimoObjetivoPctDebug = (int)porcentajeLim;
+      ultimoObjetivoPulsosDebug = pulsosObjetivo;
+
+      long pulsosActuales = enc->read();
+      debug("Auto a " + String(porcentajeLim) + "% | Objetivo teorico: " + String(pulsosObjetivo) + " pulsos");
       if (pulsosActuales < pulsosObjetivo) {
         buscandoBajar = false;
         vfdAtras();
@@ -531,15 +733,24 @@ class Motor {
         vfdAdelante();
         motorEnMovimiento = true; sentidoGiro = 1; moviendoAutomatico = true;
       } else {
-        debug(F("Ya en posicion destino.")); requestMqttUpdate = true;
+        debug(F("Ya en posicion destino."));
+        ultimoObjetivoPctDebug = -1;
+        ultimoObjetivoPulsosDebug = 0;
+        requestMqttUpdate = true;
       }
-      movimientoPorRed = true;
+      if (esRemoto) movimientoPorRed = true;   // solo activa watchdog si la orden es remota
     }
 
     void abrirManual() {
+      if (setaPulsada()) { if (motorEnMovimiento) parar(); return; }
       if (enEmergencia) return;
       if (!motorEnMovimiento || sentidoGiro != 1) {
         moviendoAutomatico = false;
+        porcUltimoObjetivoAuto = -1;        // manual: no hay "destino auto"
+
+        ultimoObjetivoPctDebug = -1;
+        ultimoObjetivoPulsosDebug = 0;
+
         tiempoInicioMovimiento = millis();
         vfdAdelante();
         motorEnMovimiento = true; sentidoGiro = 1;
@@ -547,9 +758,15 @@ class Motor {
     }
 
     void cerrarManual() {
+      if (setaPulsada()) { if (motorEnMovimiento) parar(); return; }
       if (enEmergencia) return;
       if (!motorEnMovimiento || sentidoGiro != -1) {
         moviendoAutomatico = false;
+        porcUltimoObjetivoAuto = -1;        // manual: no hay "destino auto"
+
+        ultimoObjetivoPctDebug = -1;
+        ultimoObjetivoPulsosDebug = 0;
+
         tiempoInicioMovimiento = millis();
         vfdAtras();
         motorEnMovimiento = true; sentidoGiro = -1;
@@ -581,7 +798,22 @@ class Motor {
     }
 
     void parar() {
-      if (!motorEnMovimiento && !calibrando) return;
+      // SIEMPRE reenviamos STOP al variador. Es idempotente y nos protege
+      // del caso: parar() ya se ejecutó antes pero vfdParar() se perdió
+      // por bus ocupado, y el motor seguía rampando. Así el usuario puede
+      // forzar un nuevo intento pulsando Stop aunque el flag interno
+      // diga que ya estaba parado.
+      vfdParar();
+
+      if (!motorEnMovimiento && !calibrando) {
+        // Si además estábamos esperando a que frenara de verdad, forzamos
+        // que la espera de estabilización se reevalúe desde cero.
+        if (esperandoParadaReal) {
+          lastEncValStop  = enc->read();
+          lastEncTimeStop = millis();
+        }
+        return;
+      }
 
       // Guardar posición en modos automáticos
       if (modoTiempo && moviendoAutomatico) {
@@ -597,7 +829,9 @@ class Motor {
         // Esperamos a que el motor se frene de verdad (inercia)
         esperandoParadaReal = true;
         lastEncValStop  = enc->read();
+        pulsosAlMandarStop = lastEncValStop;
         lastEncTimeStop = millis();
+        debug(">> [DEBUG INERCIA] STOP mandado. Pulsos iniciales: " + String(pulsosAlMandarStop)); // <--- AÑADE ESTE LOG
       }
 
       // En calibración modo tiempo: acumular segmento y congelar cronómetro
@@ -608,11 +842,26 @@ class Motor {
       }
 
       vfdParar();
+      bool estabaMoviendo = motorEnMovimiento && (sentidoGiro != 0);
       motorEnMovimiento  = false;
       moviendoAutomatico = false;
       movimientoPorRed   = false;
       manualLatch        = false;
-      requestMqttUpdate  = true;
+
+      // Si el motor estaba girando, NO publicamos "stopped" todavía: hay
+      // deceleración física. Iniciamos confirmación por encoder + VFD;
+      // update() publicará el estado final cuando ambos confirmen la parada.
+      // Durante calibración la publicación intermedia tampoco aporta valor:
+      // getEstadoString() ya devolverá MSG_CALIBRANDO mientras calibrando==true.
+      if (estabaMoviendo && !calibrando) {
+        confirmandoParada        = true;
+        inicioConfirmacionParada = millis();
+        vfdReporteParado         = false;
+        ultimaSolicitudVFD       = 0;        // forzar primer poll inmediato
+        debug(F(">> Parada solicitada. Esperando confirmacion (encoder + VFD)..."));
+      } else {
+        requestMqttUpdate = true;
+      }
     }
 
     // ============================================================
@@ -627,7 +876,7 @@ class Motor {
       midiendoTiempo          = false;
       tiempoInvertido         = false;
       tiempoCalibAcumulado    = 0;
-      debug(F(">> CALIBRACIÓN iniciada. Pulsa 0, mueve a 100%, pulsa 1."));
+      debug(F(">> CALIBRACION iniciada. Mueve a CERRADO y pulsa boton (o '0'). LED naranja: parpadeo lento."));
     }
 
     void setZero() {
@@ -638,7 +887,7 @@ class Motor {
       pasoCalibracion         = 2;
       midiendoTiempo          = false;
       tiempoCalibAcumulado    = 0;   // reinicia el acumulador desde el punto cero
-      debug(F(">> Set ZERO OK. Ahora mueve al 100% y pulsa Calibrar."));
+      debug(F(">> Set ZERO OK. Mueve a ABIERTO y pulsa boton (o '1'). LED naranja: fijo."));
     }
 
     void set100() {
@@ -655,6 +904,8 @@ class Motor {
         pulsos100 = enc->read();
         debug(">> Set 100% (Encoder): " + String(pulsos100) + " pulsos");
       }
+      pasoCalibracion = 3;   // esperando confirmación final (LED naranja parpadeo rápido)
+      debug(F(">> 100% marcado. Pulsa boton (o 'f') para SALIR. LED naranja: parpadeo rapido."));
     }
 
     void finCalibrado() {
@@ -683,6 +934,10 @@ class Motor {
         eepPutLong(EEP_PULSOS100, pulsos100);
         eepPutLong(EEP_POSENC,    pulsos100);
       }
+      // Tras calibrar quedamos en el extremo ABIERTO; que el siguiente
+      // getEstadoString() lo reporte como "opened" aunque el encoder haya
+      // derivado 1-2 pulsos por ruido.
+      porcUltimoObjetivoAuto = 100;
 
       mostrandoExito     = true;
       finCalibracionTime = millis();
@@ -700,7 +955,7 @@ class Motor {
 
     bool esMovimientoRed() { return movimientoPorRed; }
 
-    String getEstadoString() {
+    /*String getEstadoString() {
       if (enEmergencia)                               return String(MSG_EMERGENCIA);
       if (errorAtasco)                                return String(MSG_ERROR_ATASCO);
       if (errorLimite)                                return String(MSG_ERROR_LIMITE);
@@ -709,13 +964,50 @@ class Motor {
       if (sinCalibrar)                                return String(MSG_NO_CALIBRADO);
       if (motorEnMovimiento && sentidoGiro == 1)      return String(MSG_ABRIENDO);
       if (motorEnMovimiento && sentidoGiro == -1)     return String(MSG_CERRANDO);
-      // Posición al 100% o al 0% sin moverse
-      if (!modoTiempo) {
-        if (enc->read() >= pulsos100) return String(MSG_ABIERTO);
-        if (enc->read() <= 0)         return String(MSG_CERRADO);
-      } else {
-        if (posicionActualTiempo >= tiempoTotalRecorrido) return String(MSG_ABIERTO);
-        if (posicionActualTiempo == 0)                    return String(MSG_CERRADO);
+
+      // --- Motor parado: detectar si estamos en un extremo ---
+      // Problema que resuelve este bloque: al llegar en modo AUTO a 0% o 100%,
+      // el freno anticipado (pulsosAnticipacion) + la inercia hacen que la
+      // posición casi nunca toque exactamente el tope. Resultado: la
+      // comparación estricta fallaba y se publicaba "stopped" en vez de
+      // "opened"/"closed".
+      //
+      // Estrategia: usar el porcentaje entero (ya está acotado 0..100 y
+      // funciona igual en modo encoder y tiempo):
+      //   - Si el último movimiento AUTO iba a 100 y estamos a ≥95 %: ABIERTO.
+      //   - Si el último movimiento AUTO iba a 0   y estamos a ≤5 %:  CERRADO.
+      //   - Paradas manuales (porcUltimoObjetivoAuto == -1) o autos a
+      //     posiciones intermedias NO usan esa tolerancia; sólo se
+      //     publican opened/closed si la posición real ya está al tope.
+      {
+        int pct = getPorcentajeEntero();
+        if (porcUltimoObjetivoAuto == 100 && pct >= 95) return String(MSG_ABIERTO);
+        if (porcUltimoObjetivoAuto == 0   && pct <= 5)  return String(MSG_CERRADO);
+        if (pct >= 100) return String(MSG_ABIERTO);
+        if (pct <= 0)   return String(MSG_CERRADO);
+      }
+      return String(MSG_PARADO);
+    }*/
+    String getEstadoString() {
+      if (enEmergencia)                               return String(MSG_EMERGENCIA);
+      if (errorAtasco)                                return String(MSG_ERROR_ATASCO);
+      if (errorLimite)                                return String(MSG_ERROR_LIMITE);
+      if (calibrando)                                 return String(MSG_CALIBRANDO);
+      bool sinCalibrar = (!modoTiempo && pulsos100 == 0) || (modoTiempo && tiempoTotalRecorrido == 0);
+      if (sinCalibrar)                                return String(MSG_NO_CALIBRADO);
+
+      // Si el motor se mueve, o estamos esperando a que termine de frenar, seguimos reportando movimiento
+      if ((motorEnMovimiento || confirmandoParada) && sentidoGiro == 1)  return String(MSG_ABRIENDO);
+      if ((motorEnMovimiento || confirmandoParada) && sentidoGiro == -1) return String(MSG_CERRANDO);
+      // -------------------------
+
+      // --- Motor parado: detectar si estamos en un extremo ---
+      {
+        int pct = getPorcentajeEntero();
+        if (porcUltimoObjetivoAuto == 100 && pct >= 95) return String(MSG_ABIERTO);
+        if (porcUltimoObjetivoAuto == 0   && pct <= 5)  return String(MSG_CERRADO);
+        if (pct >= 100) return String(MSG_ABIERTO);
+        if (pct <= 0)   return String(MSG_CERRADO);
       }
       return String(MSG_PARADO);
     }

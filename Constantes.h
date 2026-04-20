@@ -8,15 +8,15 @@ const char* MQTT_BROKER       = "85.208.22.48";
 const int   MQTT_PORT         = 1883;
 const char* MQTT_USER         = "admin";
 const char* MQTT_PASS         = "admin";
-const char* MQTT_ID_PLC       = "PLC_ASPE";
+const char* MQTT_ID_PLC       = "PLC_NAVE";
 
 // Topics — datos de aplicación
-const char* MQTT_TOPIC_IN     = "/34CDB000779C/toPLC";
-const char* MQTT_TOPIC_OUT    = "/34CDB000779C/return";
+const char* MQTT_TOPIC_IN     = "/D83BDA6FB8DC/toPLC";
+const char* MQTT_TOPIC_OUT    = "/D83BDA6FB8DC/return";
 
 // Topics — heartbeat
-const char* MQTT_TOPIC_PING   = "/34CDB000779C/ping";   // ESP32 → Node-RED
-const char* MQTT_TOPIC_PONG   = "/34CDB000779C/pong";   // Node-RED → ESP32
+const char* MQTT_TOPIC_PING   = "/D83BDA6FB8DC/ping";   // ESP32 → Node-RED
+const char* MQTT_TOPIC_PONG   = "/D83BDA6FB8DC/pong";   // Node-RED → ESP32
 
 // --- CONFIGURACIÓN DE HEARTBEAT (Latido) ---
 // Tiempos en modo REPOSO (Lento para no saturar la red)

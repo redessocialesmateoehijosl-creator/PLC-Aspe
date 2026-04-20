@@ -27,13 +27,13 @@ VFDController   vfd(modbusMaster);
 
 // --- MOTOR TECHO ---
 // Q0_0 y Q0_1 liberados — motor controlado por VFD Modbus (RS485)
-#define PIN_M1_LUZ_VERDE    Q0_2   // LED verde
-#define PIN_M1_LUZ_NARANJA  Q0_3   // LED naranja
-#define PIN_M1_LUZ_ROJA     Q0_4   // LED rojo
-#define PIN_M1_SETA         I0_0   // Seta emergencia (NC: LOW = pulsada)
+#define PIN_M1_LUZ_VERDE    Q0_5   // LED verde
+#define PIN_M1_LUZ_NARANJA  Q0_6   // LED naranja
+#define PIN_M1_LUZ_ROJA     Q0_7   // LED rojo
+#define PIN_M1_SETA         I0_3   // Seta emergencia (NC: LOW = pulsada)
 #define PIN_M1_BTN_ABRIR    I0_1   // Botón abrir
-#define PIN_M1_BTN_CERRAR   I0_2   // Botón cerrar
-#define PIN_M1_BTN_CALIB    I0_3   // Botón calibrar
+#define PIN_M1_BTN_CERRAR   I0_0   // Botón cerrar
+#define PIN_M1_BTN_CALIB    I0_2   // Botón calibrar
 // Encoder — IMPORTANTE: I0_6 y I0_5 son los únicos pines con
 // interrupción hardware en el M-Duino 21+ (pin 3 y pin 2 del Mega)
 #define PIN_M1_ENC_A        I0_6   // Encoder canal A → INT1 (Mega pin 3)
@@ -122,10 +122,20 @@ void setup() {
 // ============================================================
 //  LOOP  (todo en un solo núcleo — no hay FreeRTOS en Mega)
 // ============================================================
+
+// Buffer para lectura serie NO BLOQUEANTE.
+// Serial.readStringUntil() usa un timeout de 1 s por defecto,
+// lo que paralizaría el loop durante un movimiento.
+// Este acumulador carácter a carácter no bloquea nunca.
+static String _serialBuf = "";
+
 void loop() {
   unsigned long t0 = millis();
 
-  // --- Red ---
+  // --- Red: inhibir operaciones DHCP mientras el motor se mueve ---
+  // Ethernet.begin() y Ethernet.maintain() pueden bloquear el loop.
+  // Cuando el motor está en movimiento se difieren hasta que pare.
+  Red::inhibirDHCP(grupo.estaMoviendo());
   Red::loop();
   mqtt.loop();
 
@@ -135,21 +145,30 @@ void loop() {
   // --- Motor ---
   grupo.update();
 
-  // --- Comandos por puerto serie (depuración) ---
-  if (Serial.available()) {
-    String cmd = Serial.readStringUntil('\n');
-    cmd.trim();
-    if (cmd.length() > 0) {
-      printLog("Serial cmd: " + cmd);
-      if (cmd == "M") {
-        mqtt.toggleVerbose();
-      } else if (cmd == "V") {
-        vfd.toggleVerbose();
-      } else if (cmd == "F") {
-        vfd.forzarFallaExterna();   // TEST: inyecta falla externa en el variador
-      } else {
-        ejecutarComando(cmd, &grupo, false);
+  // --- Comandos por puerto serie (no bloqueante) ---
+  // Acumula caracteres hasta recibir '\n' o '\r'; nunca bloquea.
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') {
+      _serialBuf.trim();
+      if (_serialBuf.length() > 0) {
+        String cmd = _serialBuf;
+        _serialBuf = "";
+        printLog("Serial cmd: " + cmd);
+        if (cmd == "M") {
+          mqtt.toggleVerbose();
+        } else if (cmd == "V") {
+          vfd.toggleVerbose();
+        } else if (cmd == "F") {
+          vfd.forzarFallaExterna();   // TEST: inyecta falla externa en el variador
+        } else {
+          ejecutarComando(cmd, &grupo, false);
+        }
       }
+    } else {
+      _serialBuf += c;
+      // Protección contra desbordamiento (línea sin '\n' muy larga)
+      if (_serialBuf.length() > 64) _serialBuf = "";
     }
   }
 

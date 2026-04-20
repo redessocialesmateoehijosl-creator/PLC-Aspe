@@ -111,7 +111,7 @@ class GrupoMotores {
     void moverA(int porcentaje) {
       if (!esSeguroMoverseAutomatico()) return;
       debug("[GRUPO CMD] >> MOVER A " + String(porcentaje) + "%");
-      for (int i = 0; i < numMotores; i++) motores[i]->moverA(porcentaje);
+      for (int i = 0; i < numMotores; i++) motores[i]->moverA(porcentaje, true);  // siempre remoto
     }
 
     void parar() {
@@ -124,6 +124,13 @@ class GrupoMotores {
         if (motores[i]->esMovimientoRed()) return true;
       }
       return false;
+    }
+
+    // true si el grupo está en movimiento activo (abriendo, cerrando o calibrando)
+    // Usado por Red::inhibirDHCP() para proteger el loop de bloqueos de red.
+    bool estaMoviendo() {
+      String est = getEstadoString();
+      return (est == MSG_ABRIENDO || est == MSG_CERRANDO || est == MSG_CALIBRANDO);
     }
 
     void setAnticipacion(int valor) {
