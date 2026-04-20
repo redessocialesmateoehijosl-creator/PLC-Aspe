@@ -625,12 +625,11 @@ class Motor {
       if (esperandoParadaReal && !modoTiempo) {
         long lecturaActual = enc->read();
         if (lecturaActual != lastEncValStop) {
-          // El motor SIGUE moviéndose tras haber mandado parar.
-          // Causa típica: la 1ª orden vfdParar() se perdió porque el bus
-          // Modbus estaba ocupado (heartbeat o lectura de estado).
-          // Reinsistimos en cada iteración: isBusy() filtra; el comando
-          // acaba llegando al variador en cuanto se libere el bus.
-          vfdParar();
+          // El motor sigue decelerando — actualizar referencia para el timer
+          // de estabilización. NO rellamamos vfdParar(): el mecanismo
+          // _stopPendiente en VFDController ya garantiza que el STOP se
+          // enviará en cuanto el bus Modbus quede libre. Llamarlo de nuevo
+          // solo generaría spam de "STOP encolado" en cada iteración del loop.
           lastEncValStop   = lecturaActual;
           lastEncTimeStop  = millis();
         } else {
@@ -923,7 +922,8 @@ class Motor {
         debug(">> CAL pausa. Acumulado: " + String(tiempoCalibAcumulado) + " ms");
       }
 
-      vfdParar();
+      // No rellamamos vfdParar() aquí: ya fue llamado al principio de parar()
+      // y _stopPendiente garantiza el envío en cuanto el bus quede libre.
       bool estabaMoviendo = motorEnMovimiento && (sentidoGiro != 0);
       motorEnMovimiento  = false;
       moviendoAutomatico = false;
