@@ -44,6 +44,10 @@ class VFDController {
     bool          _motorApagadoUlt       = false;  // Bit1  "Apagado"
     unsigned long _tsUltimaLecturaEstado = 0;      // millis() del último parse OK
 
+    // --- FALLA ACTIVA DEL VARIADOR ---
+    bool          _hayFalla              = false;  // true = variador en estado de falla
+    uint16_t      _faultCode             = 0;      // 0 = sin falla; 1-17 = código activo
+
   public:
     VFDController(ModbusRTUMaster& master) : _master(master) {}
 
@@ -64,6 +68,11 @@ class VFDController {
     bool motorApagado()                   { return _motorApagadoUlt; }
     bool estadoFresco(unsigned long ms)   { return (millis() - _tsUltimaLecturaEstado) < ms; }
     unsigned long msDesdeUltimaLectura()  { return millis() - _tsUltimaLecturaEstado; }
+
+    // --- Falla activa del variador ---
+    bool     hayFalla()       { return _hayFalla;   }
+    uint16_t getCodigoFalla() { return _faultCode;  }
+    void     limpiarFalla()   { _hayFalla = false; _faultCode = 0; }
 
     // --- COMANDOS (comprueban bus libre antes de enviar) ---
     void marchaAdelante() {
@@ -163,39 +172,49 @@ class VFDController {
           // Bit4  (0x0010) = Reversa          → dirección REV seleccionada
           // Bit10 (0x0400) = Canal Modbus     → comandos vía RS485 activos
           // Bit12 (0x1000) = En funcionamiento→ motor girando realmente
-          bool apagado      = (statusReg & 0x0002);
-          bool enFwd        = (statusReg & 0x0008);
-          bool enRev        = (statusReg & 0x0010);
-          bool enMarcha     = (statusReg & 0x1000);
+          // Detección de falla: cuando el variador está en falla, 2101H devuelve
+          // el código de falla directamente (1-17), sin bits altos activos.
+          // En operación normal, Bit10 (0x0400, Canal Modbus) SIEMPRE está activo,
+          // lo que permite distinguir sin ambigüedad un código de falla del estado normal.
+          // Ejemplo: 0x0002 = "Apagado" (normal, Bit10 no aplica aún si apagado vía local),
+          //          pero en modo Modbus, un valor puro 2 sin Bit10 = "Sobretensión" (falla).
+          bool enFallo  = (statusReg > 0 && statusReg <= 17 && !(statusReg & 0x0400));
+          uint16_t faultCode = enFallo ? statusReg : 0;
+
+          bool apagado      = !enFallo && (statusReg & 0x0002);
+          bool enFwd        = !enFallo && (statusReg & 0x0008);
+          bool enRev        = !enFallo && (statusReg & 0x0010);
+          bool enMarcha     = !enFallo && (statusReg & 0x1000);
           bool canalModbus  = (statusReg & 0x0400);
 
-          bool enMovimiento = (bool)enMarcha;
+          bool enMovimiento = !enFallo && (bool)enMarcha;
 
-          // Exponer estado para consulta externa (Motor::update() lo necesita
-          // para confirmar que una parada real ya se ha producido).
+          // Exponer estado para consulta externa:
+          //   motorGirando()  → Motor::update() lo usa para confirmar parada real
+          //   hayFalla()      → Motor::verificarAtasco() para diagnosticar causa
           _motorGirandoUlt       = enMovimiento;
           _motorApagadoUlt       = apagado;
           _tsUltimaLecturaEstado = millis();
-
-          uint16_t faultCode = (!enMovimiento && statusReg >= 1 && statusReg <= 17)
-                               ? statusReg : 0;
+          _hayFalla              = enFallo;
+          _faultCode             = faultCode;
 
           String estado;
-          if      (enMarcha && enRev)  estado = "EN MARCHA REV";
-          else if (enMarcha)           estado = "EN MARCHA FWD";
-          else if (apagado)            estado = "PARADO";
-          else                         estado = "STANDBY";
+          if      (enFallo)           estado = "!FALLA (cod " + String(faultCode) + ")";
+          else if (enMarcha && enRev) estado = "EN MARCHA REV";
+          else if (enMarcha)          estado = "EN MARCHA FWD";
+          else if (apagado)           estado = "PARADO";
+          else                        estado = "STANDBY";
 
-          // Estado normal: solo en verbose
-          if (!_esHeartbeat || _verbose) {
+          // Estado normal: solo en verbose; FALLA: siempre visible
+          if (enFallo || !_esHeartbeat || _verbose) {
             vlog("<< 2101H=0x" + String(statusReg, HEX) +
                  " | Freq=" + String(frecuencia) + "Hz" +
                  " | " + estado +
-                 (canalModbus ? " | [Modbus]" : " | [Local]"));
+                 (!enFallo && canalModbus ? " | [Modbus]" : ""));
           }
 
           // Fallo: SIEMPRE visible, independientemente del verbose
-          if (faultCode > 0) {
+          if (enFallo) {
             InfoError info = obtenerInfoError(faultCode);
             debug("!!! FALLA VARIADOR cod:" + String(faultCode) +
                   " — " + info.nombre + " — " + info.detalle);

@@ -30,6 +30,7 @@ const char* MSG_CERRADO       = "status closed";
 const char* MSG_PARADO        = "status stopped";
 const char* MSG_ERROR_LIMITE  = "status error_limite";
 const char* MSG_ERROR_ATASCO  = "status error_encoder";
+const char* MSG_ERROR_VFD     = "status error_vfd";
 const char* PREFIJO_POS       = "pos ";
 
 // ============================================================
@@ -176,8 +177,9 @@ class Motor {
     static const unsigned long INTERVALO_POLL_VFD     = 250;   // ms entre lecturas 2101H
     static const unsigned long TIMEOUT_CONFIRM_PARADA = 5000;  // ms máx. esperando confirmación
 
-    // Watchdog encoder (atasco)
+    // Watchdog encoder (atasco) y error de variador
     bool          errorAtasco       = false;
+    bool          errorVFD          = false;   // Variador en falla o sin respuesta a marcha
     long          lastPosCheck      = 0;
     unsigned long lastMoveTime      = 0;
     const int TIEMPO_GRACIA_ARRANQUE = 1000;
@@ -289,12 +291,23 @@ class Motor {
     }
 
     // ============================================================
-    //  WATCHDOG DE ENCODER  (atasco / rotura)
+    //  WATCHDOG CRUZADO: ENCODER + VFD
+    //
+    //  Cuando el encoder no avanza durante TIEMPO_MAX_SIN_PULSOS,
+    //  se cruza con el estado del variador para diagnosticar la causa:
+    //
+    //  • VFD dice "en marcha" + encoder parado  → ENCODER roto/desacoplado
+    //  • VFD dice "en falla"                    → ERROR VFD (falla específica)
+    //  • VFD dice "parado" o sin respuesta      → ERROR VFD (no ejecutó la orden)
+    //  • Sin VFD disponible                     → asume error de encoder (comportamiento anterior)
     // ============================================================
     void verificarAtasco() {
       if (!motorEnMovimiento || modoTiempo || calibrando) return;
 
-      if (millis() - tiempoInicioMovimiento < (unsigned long)TIEMPO_GRACIA_ARRANQUE) {
+      unsigned long now = millis();
+
+      // Período de gracia al arranque (el motor aún está acelerando)
+      if (now - tiempoInicioMovimiento < (unsigned long)TIEMPO_GRACIA_ARRANQUE) {
         lastMoveTime = millis();
         lastPosCheck = enc->read();
         return;
@@ -303,19 +316,78 @@ class Motor {
       long posActual = enc->read();
 
       if (abs(posActual - lastPosCheck) > 2) {
+        // Encoder avanzando → todo OK
         lastMoveTime = millis();
         lastPosCheck = posActual;
-      } else {
-        if (millis() - lastMoveTime > (unsigned long)TIEMPO_MAX_SIN_PULSOS) {
-          debug(F("!!! ERROR FATAL: ENCODER NO RESPONDE !!!"));
-          parar();
-          errorAtasco = true;
-          // Descalibración forzosa por seguridad
-          pulsos100 = 0;
-          eepPutLong(EEP_PULSOS100, 0L);
-          debug(F(">> SEGURIDAD: Sistema marcado como NO CALIBRADO."));
-        }
+        return;
       }
+
+      if (now - lastMoveTime <= (unsigned long)TIEMPO_MAX_SIN_PULSOS) return;
+
+      // ── Timeout: el encoder lleva TIEMPO_MAX_SIN_PULSOS sin moverse ──
+      // Cruzar con el estado del variador para saber la causa real.
+      bool vfdGirando      = vfd && vfd->motorGirando()  && vfd->estadoFresco(2000);
+      bool vfdConFalla     = vfd && vfd->hayFalla()       && vfd->estadoFresco(2000);
+      bool vfdParado       = vfd && !vfd->motorGirando() && vfd->estadoFresco(2000) && !vfd->hayFalla();
+      bool vfdSinRespuesta = !vfd || !vfd->estadoFresco(5000);
+
+      if (vfdGirando) {
+        // El variador confirma que el motor gira, pero el encoder no lo ve.
+        // Causa probable: encoder roto, eje desacoplado o fallo de señal.
+        debug(F("!!! ATASCO ENCODER: VFD en marcha pero encoder sin pulsos → Encoder roto o desacoplado !!!"));
+        parar();
+        errorAtasco = true;
+        pulsos100   = 0;
+        eepPutLong(EEP_PULSOS100, 0L);
+        debug(F(">> SEGURIDAD: Sistema marcado como NO CALIBRADO."));
+
+      } else if (vfdConFalla) {
+        // El variador entró en falla (se paró solo). No es el encoder.
+        InfoError info = obtenerInfoError(vfd->getCodigoFalla());
+        debug("!!! ERROR VFD: Falla activa cod:" + String(vfd->getCodigoFalla()) +
+              " — " + info.nombre + " — " + info.detalle);
+        parar();
+        errorVFD = true;
+
+      } else if (vfdParado || vfdSinRespuesta) {
+        // VFD parado (o sin respuesta) aunque le mandamos marcha.
+        // El variador no ejecutó el comando: error de comunicación o rechazo interno.
+        if (vfdSinRespuesta) {
+          debug(F("!!! ERROR VFD: Sin respuesta RS485 — Revisar cableado y terminacion !!!"));
+        } else {
+          debug(F("!!! ERROR VFD: Variador parado aunque recibio orden de marcha !!!"));
+        }
+        parar();
+        errorVFD = true;
+
+      } else {
+        // Sin datos VFD disponibles: comportamiento conservador original.
+        debug(F("!!! ERROR ENCODER: Sin pulsos y sin datos VFD para diagnosticar !!!"));
+        parar();
+        errorAtasco = true;
+        pulsos100   = 0;
+        eepPutLong(EEP_PULSOS100, 0L);
+        debug(F(">> SEGURIDAD: Sistema marcado como NO CALIBRADO."));
+      }
+    }
+
+    // ============================================================
+    //  VIGILANCIA PROACTIVA DE FALLA VFD
+    //
+    //  Se llama en cada update(). Si el variador entra en falla
+    //  MIENTRAS el motor se mueve, se para inmediatamente sin
+    //  esperar el timeout del watchdog del encoder.
+    // ============================================================
+    void vigilarFallaVFD() {
+      if (!motorEnMovimiento && !calibrando) return;
+      if (!vfd || !vfd->estadoFresco(3000)) return;
+      if (!vfd->hayFalla()) return;
+
+      InfoError info = obtenerInfoError(vfd->getCodigoFalla());
+      debug("!!! FALLA VFD DETECTADA (cod:" + String(vfd->getCodigoFalla()) +
+            ") " + info.nombre + " — Parada de emergencia !!!");
+      parar();
+      errorVFD = true;
     }
 
     // ============================================================
@@ -326,7 +398,7 @@ class Motor {
       if (now - lastBlinkTime     > BLINK_LENTO)  { blinkState     = !blinkState;     lastBlinkTime     = now; }
       if (now - lastFastBlinkTime > BLINK_RAPIDO) { fastBlinkState = !fastBlinkState; lastFastBlinkTime = now; }
 
-      if (enEmergencia || errorLimite || errorAtasco) {
+      if (enEmergencia || errorLimite || errorAtasco || errorVFD) {
         digitalWrite(pinRojo, blinkState); digitalWrite(pinVerde, LOW); digitalWrite(pinNaranja, LOW); return;
       }
       if (mostrandoExito) {
@@ -368,9 +440,12 @@ class Motor {
         if (enEmergencia) {
           debug(F("Emergencia OFF."));
           enEmergencia = false;
-          if (errorLimite || errorAtasco) {
-            errorLimite = false; errorAtasco = false;
-            debug(F(">> REARME: Errores limpiados."));
+          if (errorLimite || errorAtasco || errorVFD) {
+            errorLimite = false;
+            errorAtasco = false;
+            if (errorVFD && vfd) { vfd->limpiarFalla(); vfd->resetErrores(); }
+            errorVFD    = false;
+            debug(F(">> REARME: Errores limpiados. Reset VFD enviado."));
           }
         }
       }
@@ -481,8 +556,14 @@ class Motor {
     void setLogger(LogCallback callback) { externalLog = callback; }
 
     void resetErroresVFD() {
-      if (vfd) { vfd->resetErrores(); debug(F(">> VFD: Reset de errores enviado.")); }
-      else      { debug(F(">> VFD: no asignado.")); }
+      errorVFD = false;
+      if (vfd) {
+        vfd->limpiarFalla();
+        vfd->resetErrores();
+        debug(F(">> VFD: Reset de errores enviado. Flag errorVFD limpiado."));
+      } else {
+        debug(F(">> VFD: no asignado."));
+      }
     }
 
     void begin() {
@@ -537,7 +618,8 @@ class Motor {
       gestionarLuces();
       gestionarEntradas();
       detectarRuidoEncoder();   // filtra glitches ESD antes de que lleguen a la lógica
-      verificarAtasco();
+      vigilarFallaVFD();        // para inmediatamente si el VFD entra en falla
+      verificarAtasco();        // diagnóstico cruzado encoder+VFD si el encoder no avanza
 
       // Esperar a que el motor se frene de verdad antes de guardar posición
       if (esperandoParadaReal && !modoTiempo) {
@@ -651,7 +733,7 @@ class Motor {
       esperandoParadaReal = false;
       confirmandoParada = false;
       if (setaPulsada()) { if (motorEnMovimiento) parar(); return; }
-      if (enEmergencia || errorLimite) return;
+      if (enEmergencia || errorLimite || errorVFD) return;
 
       if (calibrando) {
         if (modoTiempo && esperandoInicio) {
@@ -679,7 +761,7 @@ class Motor {
       esperandoParadaReal = false;
       confirmandoParada = false;
       if (setaPulsada()) { if (motorEnMovimiento) parar(); return; }
-      if (enEmergencia || errorLimite) return;
+      if (enEmergencia || errorLimite || errorVFD) return;
 
       if (calibrando) {
         if (modoTiempo && esperandoInicio) {
@@ -711,7 +793,7 @@ class Motor {
         if (motorEnMovimiento) parar();
         debug(F("moverA rechazado (SETA pulsada).")); return;
       }
-      if (modoTiempo || calibrando || enEmergencia || errorLimite || errorAtasco) {
+      if (modoTiempo || calibrando || enEmergencia || errorLimite || errorAtasco || errorVFD) {
         debug(F("moverA rechazado (Error o Estado).")); return;
       }
       long porcentajeLim = constrain((long)porcentaje, 0L, 100L);
@@ -743,7 +825,7 @@ class Motor {
 
     void abrirManual() {
       if (setaPulsada()) { if (motorEnMovimiento) parar(); return; }
-      if (enEmergencia) return;
+      if (enEmergencia || errorVFD) return;
       if (!motorEnMovimiento || sentidoGiro != 1) {
         moviendoAutomatico = false;
         porcUltimoObjetivoAuto = -1;        // manual: no hay "destino auto"
@@ -759,7 +841,7 @@ class Motor {
 
     void cerrarManual() {
       if (setaPulsada()) { if (motorEnMovimiento) parar(); return; }
-      if (enEmergencia) return;
+      if (enEmergencia || errorVFD) return;
       if (!motorEnMovimiento || sentidoGiro != -1) {
         moviendoAutomatico = false;
         porcUltimoObjetivoAuto = -1;        // manual: no hay "destino auto"
@@ -991,6 +1073,7 @@ class Motor {
     String getEstadoString() {
       if (enEmergencia)                               return String(MSG_EMERGENCIA);
       if (errorAtasco)                                return String(MSG_ERROR_ATASCO);
+      if (errorVFD)                                   return String(MSG_ERROR_VFD);
       if (errorLimite)                                return String(MSG_ERROR_LIMITE);
       if (calibrando)                                 return String(MSG_CALIBRANDO);
       bool sinCalibrar = (!modoTiempo && pulsos100 == 0) || (modoTiempo && tiempoTotalRecorrido == 0);

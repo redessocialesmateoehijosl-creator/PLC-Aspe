@@ -78,7 +78,7 @@ class GrupoMotores {
       if (estado == MSG_NO_CALIBRADO) { debug(F("[GRUPO] Rechazado: NO CALIBRADO."));   return false; }
       if (estado == MSG_CALIBRANDO)   { debug(F("[GRUPO] Rechazado: CALIBRANDO."));     return false; }
       if (estado == MSG_EMERGENCIA)   { debug(F("[GRUPO] Rechazado: EMERGENCIA."));     return false; }
-      if (estado == MSG_ERROR_LIMITE || estado == MSG_ERROR_ATASCO) {
+      if (estado == MSG_ERROR_LIMITE || estado == MSG_ERROR_ATASCO || estado == MSG_ERROR_VFD) {
         debug(F("[GRUPO] Rechazado: ERRORES activos.")); return false;
       }
       return true;
@@ -199,6 +199,7 @@ class GrupoMotores {
     String getEstadoString() {
       bool alguienEmergencia = false;
       bool alguienAtasco     = false;
+      bool alguienErrorVFD   = false;
       bool alguienErrorLim   = false;
       bool alguienNoCal      = false;
       bool alguienCalibrando = false;
@@ -208,11 +209,12 @@ class GrupoMotores {
 
       for (int i = 0; i < numMotores; i++) {
         String s = motores[i]->getEstadoString();
-        if (s == MSG_EMERGENCIA)  alguienEmergencia = true;
-        if (s == MSG_ERROR_ATASCO) alguienAtasco    = true;
-        if (s == MSG_ERROR_LIMITE) alguienErrorLim  = true;
-        if (s == MSG_NO_CALIBRADO) alguienNoCal     = true;
-        if (s == MSG_CALIBRANDO)   alguienCalibrando= true;
+        if (s == MSG_EMERGENCIA)   alguienEmergencia = true;
+        if (s == MSG_ERROR_ATASCO) alguienAtasco     = true;
+        if (s == MSG_ERROR_VFD)    alguienErrorVFD   = true;
+        if (s == MSG_ERROR_LIMITE) alguienErrorLim   = true;
+        if (s == MSG_NO_CALIBRADO) alguienNoCal      = true;
+        if (s == MSG_CALIBRANDO)   alguienCalibrando = true;
         if (s == MSG_ABRIENDO || s == MSG_CERRANDO) alguienMoviendo = true;
         if (s == MSG_ABIERTO) contAbiertos++;
         if (s == MSG_CERRADO) contCerrados++;
@@ -220,6 +222,7 @@ class GrupoMotores {
 
       if (alguienEmergencia) return String(MSG_EMERGENCIA);
       if (alguienAtasco)     return String(MSG_ERROR_ATASCO);
+      if (alguienErrorVFD)   return String(MSG_ERROR_VFD);
       if (alguienErrorLim)   return String(MSG_ERROR_LIMITE);
       if (alguienNoCal)      return String(MSG_NO_CALIBRADO);
       if (alguienCalibrando) return String(MSG_CALIBRANDO);
