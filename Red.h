@@ -80,7 +80,7 @@ class Red {
       delay(500);
     }
 
-    static void loop() {
+    /*static void loop() {
       _linkJustRecovered = false;
 
       bool linkOK = (Ethernet.linkStatus() == LinkON);
@@ -97,6 +97,34 @@ class Red {
         // el lease en segundo plano sin bloquear (llamado en cada ciclo loop).
         _dhcpPendiente = false;     // Cancelar cualquier DHCP pendiente previo
         _linkJustRecovered = true;  // MQTT reconectará inmediatamente
+
+      } else if (!linkOK && _lastLinkON) {
+        Serial.println(F("[RED] !!! Cable Ethernet desconectado !!!"));
+      }
+
+      _lastLinkON = linkOK;
+      */
+    static void loop() {
+
+      _linkJustRecovered = false;
+
+      bool linkOK = (Ethernet.linkStatus() == LinkON);
+
+      if (linkOK && !_lastLinkON) {
+        // ── Cable reconectado ──────────────────────────────
+        Serial.println(F("[RED] Cable reconectado. Refrescando IP..."));
+        
+        // Forzamos un inicio rápido de Ethernet para refrescar Gateway y tablas ARP.
+        // Usamos un timeout de 1000ms para no bloquear mucho el loop.
+        if (Ethernet.begin(const_cast<byte*>(_mac), 1000) != 0) {
+          Serial.print(F("[RED] IP Refrescada: "));
+          Serial.println(Ethernet.localIP());
+        } else {
+          Serial.println(F("[RED] Error al refrescar DHCP. Usando previa."));
+        }
+
+        _dhcpPendiente = false;
+        _linkJustRecovered = true;  // Esto dispara la reconexión inmediata en Mqtt.h
 
       } else if (!linkOK && _lastLinkON) {
         Serial.println(F("[RED] !!! Cable Ethernet desconectado !!!"));

@@ -791,6 +791,63 @@ class Motor {
     void moverA(int porcentaje, bool esRemoto = false) {
       esperandoParadaReal = false;
       confirmandoParada = false;
+
+      if (setaPulsada()) {
+        if (motorEnMovimiento) parar();
+        debug(F("moverA rechazado (SETA pulsada)."));
+        return;
+      }
+
+      if (modoTiempo || calibrando || enEmergencia || errorLimite || errorAtasco || errorVFD) {
+        debug(F("moverA rechazado (Error o Estado)."));
+        return;
+      }
+
+      long porcentajeLim = constrain((long)porcentaje, 0L, 100L);
+      
+      // --- FILTRO DE POSICIÓN ACTUAL ---
+      int pctActual = getPorcentajeEntero();
+      if (abs(pctActual - (int)porcentajeLim) <= 2) {
+        debug("Ya en posicion (" + String(pctActual) + "%). No es necesario mover.");
+        porcUltimoObjetivoAuto = (int)porcentajeLim;
+        ultimoObjetivoPctDebug = -1;
+        requestMqttUpdate = true; 
+        return;
+      }
+
+      pulsosObjetivo = (pulsos100 * porcentajeLim) / 100L;
+      porcUltimoObjetivoAuto = (int)porcentajeLim;
+
+      ultimoObjetivoPctDebug = (int)porcentajeLim;
+      ultimoObjetivoPulsosDebug = pulsosObjetivo;
+
+      long pulsosActuales = enc->read();
+      debug("Auto a " + String(porcentajeLim) + "% | Objetivo teorico: " + String(pulsosObjetivo) + " pulsos");
+
+      if (pulsosActuales < pulsosObjetivo) {
+        buscandoBajar = false;
+        vfdAtras();
+        motorEnMovimiento = true;
+        sentidoGiro = -1;
+        moviendoAutomatico = true;
+      } else if (pulsosActuales > pulsosObjetivo) {
+        buscandoBajar = true;
+        vfdAdelante();
+        motorEnMovimiento = true;
+        sentidoGiro = 1;
+        moviendoAutomatico = true;
+      } else {
+        debug(F("Ya en posicion destino exacta."));
+        ultimoObjetivoPctDebug = -1;
+        ultimoObjetivoPulsosDebug = 0;
+        requestMqttUpdate = true;
+      }
+
+      movimientoPorRed = esRemoto;
+    }
+    /*void moverA(int porcentaje, bool esRemoto = false) {
+      esperandoParadaReal = false;
+      confirmandoParada = false;
       if (setaPulsada()) {
         if (motorEnMovimiento) parar();
         debug(F("moverA rechazado (SETA pulsada).")); return;
@@ -826,7 +883,7 @@ class Motor {
       // Orden local (botón) → limpia el flag aunque antes hubiera una orden remota:
       // si el operador toma el control desde el cuadro, la red ya no manda.
       movimientoPorRed = esRemoto;
-    }
+    }*/
 
     void abrirManual() {
       if (setaPulsada()) { if (motorEnMovimiento) parar(); return; }
