@@ -37,7 +37,9 @@ class MqttHandler {
     EthernetClient ethClient;
     PubSubClient   client;
 
-    GrupoMotores* _grupoVigilado = nullptr;
+    GrupoMotores*  _grupoVigilado = nullptr;
+    VFDController* _vfdVigilado   = nullptr;
+    String         _vfdMotorId    = "motor_1";  // identificador del motor en el JSON
 
     // Configuración
     const char* _server   = nullptr;  int _port = 1883;
@@ -53,6 +55,16 @@ class MqttHandler {
     int           lastPorcentaje       = -1;
     unsigned long lastPingTime         = 0;
     unsigned long lastPongTime         = 0;
+
+    // Tracking telemetría VFD (detección de cambio para publicación)
+    float         _vfdLastFreqSal  = -1.0;
+    float         _vfdLastFreqCfg  = -1.0;
+    float         _vfdLastCorr     = -1.0;
+    float         _vfdLastVBus     = -1.0;
+    float         _vfdLastVSal     = -1.0;
+    String        _vfdLastEstado   = "";
+    uint16_t      _vfdLastFalla    = 0xFFFF;  // valor imposible → fuerza primera publicación
+    unsigned long _vfdLastPublish  = 0;
 
     // Modo verbose (activar con comando 'M')
     bool _verbose = false;
@@ -170,6 +182,10 @@ class MqttHandler {
     void setLogger(LogCallback callback)       { externalLog    = callback; }
     void setCommandCallback(CommandCallback cb){ commandCallback = cb; }
     void vincularGrupo(GrupoMotores* g)        { _grupoVigilado = g; }
+    void vincularVFD(VFDController* v, const char* motorId = "motor_1") {
+      _vfdVigilado = v;
+      _vfdMotorId  = motorId;
+    }
 
     void toggleVerbose() {
       _verbose = !_verbose;
@@ -219,6 +235,8 @@ class MqttHandler {
         if (msg == "?") {
           lastEstadoStr  = "";
           lastPorcentaje = -1;
+          _vfdLastEstado = "";   // fuerza reenvío del JSON VFD también
+          _vfdLastFalla  = 0xFFFF;
           debug(F("Peticion '?' recibida. Forzando actualizacion."));
         }
         if (commandCallback) commandCallback(msg);
@@ -228,11 +246,85 @@ class MqttHandler {
     }
 
     // --------------------------------------------------------
+    //  Telemetría VFD — publicar JSON al topic /vfd
+    //
+    //  Se publica cuando cualquier valor cambia más allá del
+    //  umbral mínimo, o como máximo cada VFD_PUBLISH_INTERVAL ms
+    //  aunque no haya cambio (heartbeat de datos).
+    //
+    //  Umbrales: frecuencia ≥ 0.1 Hz · corriente ≥ 0.1 A
+    //            voltajes ≥ 1 V · estado o falla cualquier cambio
+    // --------------------------------------------------------
+    // Intervalo máximo de publicación forzada (aunque no haya cambio)
+    static const unsigned long VFD_INTERVAL_MARCHA = 300UL;   // 0.3s — motor en movimiento
+    static const unsigned long VFD_INTERVAL_REPOSO = 2000UL;  // 2s   — motor parado
+
+    void publicarVFD() {
+      if (!_vfdVigilado) return;
+      if (!client.connected() || !Red::linkOK()) return;
+      // Solo publicar si hay datos frescos del variador (<10s)
+      if (!_vfdVigilado->estadoFresco(10000)) return;
+
+      float    freqSal = _vfdVigilado->getFreqSalida();
+      float    freqCfg = _vfdVigilado->getFreqConfigurada();
+      float    corr    = _vfdVigilado->getCorriente();
+      float    vBus    = _vfdVigilado->getVBus();
+      float    vSal    = _vfdVigilado->getVSalida();
+      String   estado  = _vfdVigilado->getEstadoStr();
+      uint16_t falla   = _vfdVigilado->getCodigoFalla();
+
+      bool enMarcha = _vfdVigilado->motorGirando();
+      unsigned long intervalo = enMarcha ? VFD_INTERVAL_MARCHA : VFD_INTERVAL_REPOSO;
+
+      unsigned long now = millis();
+      bool cambio =
+        (fabs(freqSal - _vfdLastFreqSal) >= 0.1f) ||
+        (fabs(freqCfg - _vfdLastFreqCfg) >= 0.1f) ||
+        (fabs(corr    - _vfdLastCorr   ) >= 0.1f) ||
+        (fabs(vBus    - _vfdLastVBus   ) >= 1.0f) ||
+        (fabs(vSal    - _vfdLastVSal   ) >= 1.0f) ||
+        (estado != _vfdLastEstado)                  ||
+        (falla  != _vfdLastFalla);
+      bool forzar = (now - _vfdLastPublish) >= intervalo;
+
+      if (!cambio && !forzar) return;
+
+      // Construir JSON sin ArduinoJson (ahorra RAM en Mega)
+      // Formato: {"motor":"techo_1","freq_sal":45.50,"freq_cfg":50.00,"corriente":3.2,
+      //           "v_bus":540.0,"v_sal":380.0,
+      //           "estado":"EN MARCHA FWD","falla":0,"falla_txt":"OK"}
+      String nombre_falla = (falla == 0) ? "OK" : _vfdVigilado->diagnosticoCompleto(falla).nombre;
+      String json = "{";
+      json += "\"motor\":\""    + _vfdMotorId + "\",";
+      json += "\"freq_sal\":"   + String(freqSal, 2) + ",";
+      json += "\"freq_cfg\":"   + String(freqCfg, 2) + ",";
+      json += "\"corriente\":"  + String(corr,    1) + ",";
+      json += "\"v_bus\":"      + String(vBus,    1) + ",";
+      json += "\"v_sal\":"      + String(vSal,    1) + ",";
+      json += "\"estado\":\""   + estado + "\",";
+      json += "\"falla\":"      + String(falla)      + ",";
+      json += "\"falla_txt\":\"" + nombre_falla + "\"";
+      json += "}";
+
+      client.publish(MQTT_TOPIC_VFD, json.c_str());
+      vlog(">> VFD [" + String(MQTT_TOPIC_VFD) + "] " + json);
+
+      _vfdLastFreqSal = freqSal;
+      _vfdLastFreqCfg = freqCfg;
+      _vfdLastCorr    = corr;
+      _vfdLastVBus    = vBus;
+      _vfdLastVSal    = vSal;
+      _vfdLastEstado  = estado;
+      _vfdLastFalla   = falla;
+      _vfdLastPublish = now;
+    }
+
+    // --------------------------------------------------------
     //  Vigilancia del motor techo (publicación por cambio)
     // --------------------------------------------------------
     void vigilarGrupo() {
       if (_grupoVigilado == nullptr) return;
-      if (millis() - lastCheckTime > 100) {
+      if (millis() - lastCheckTime > 30) {
         lastCheckTime = millis();
         bool   forzar      = _grupoVigilado->checkMqttRequest();
         String estadoActual= _grupoVigilado->getEstadoString();
@@ -247,6 +339,9 @@ class MqttHandler {
           publish(String(PREFIJO_POS) + String(porcActual));
           lastPorcentaje = porcActual;
         }
+
+        // Telemetría del variador: publicar si hay cambio o cada 5s
+        publicarVFD();
       }
     }
 

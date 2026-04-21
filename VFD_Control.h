@@ -30,7 +30,9 @@ class VFDController {
     bool          _esperandoLectura   = false;
     bool          _esHeartbeat        = false;
     unsigned long _ultimaComunicacion = 0;
-    static const unsigned long INTERVALO_HEARTBEAT = 4000UL; // 4s (VFD timeout P6.02 = 10s)
+    // Intervalo de polling Modbus: rápido en marcha (monitoreo crítico), lento en reposo
+    static const unsigned long INTERVALO_HB_MARCHA = 200UL;   // 0.2s — motor en movimiento
+    static const unsigned long INTERVALO_HB_REPOSO = 2000UL;  // 2s   — motor parado (P6.02=10s)
 
     // Cola de prioridad para STOP:
     // Si parar() se llama con el bus Modbus ocupado, el comando se
@@ -47,6 +49,14 @@ class VFDController {
     // --- FALLA ACTIVA DEL VARIADOR ---
     bool          _hayFalla              = false;  // true = variador en estado de falla
     uint16_t      _faultCode             = 0;      // 0 = sin falla; 1-17 = código activo
+
+    // --- TELEMETRÍA: últimos valores leídos (registros 2101H-2106H) ---
+    float    _freqSalida      = 0.0;   // Hz  (2103H, 2 decimales)
+    float    _freqConfigurada = 0.0;   // Hz  (2102H, 2 decimales)
+    float    _corriente       = 0.0;   // A   (2104H, 1 decimal)
+    float    _vBus            = 0.0;   // V   (2105H, 1 decimal)
+    float    _vSalida         = 0.0;   // V   (2106H, 1 decimal)
+    String   _estadoStr       = "";    // "PARADO" / "EN MARCHA FWD" / etc.
 
   public:
     VFDController(ModbusRTUMaster& master) : _master(master) {}
@@ -73,6 +83,14 @@ class VFDController {
     bool     hayFalla()       { return _hayFalla;   }
     uint16_t getCodigoFalla() { return _faultCode;  }
     void     limpiarFalla()   { _hayFalla = false; _faultCode = 0; }
+
+    // --- Telemetría: getters de los últimos valores leídos ---
+    float  getFreqSalida()      { return _freqSalida;      }
+    float  getFreqConfigurada() { return _freqConfigurada; }
+    float  getCorriente()       { return _corriente;       }
+    float  getVBus()            { return _vBus;            }
+    float  getVSalida()         { return _vSalida;         }
+    String getEstadoStr()       { return _estadoStr;       }
 
     // --- COMANDOS (comprueban bus libre antes de enviar) ---
     void marchaAdelante() {
@@ -138,8 +156,11 @@ class VFDController {
         return;   // procesar la respuesta en el próximo ciclo
       }
 
-      // Heartbeat: lectura silenciosa cada 4s para evitar error E485
-      if (!isBusy() && (millis() - _ultimaComunicacion >= INTERVALO_HEARTBEAT)) {
+      // Heartbeat: intervalo dinámico según estado del motor
+      //   En marcha → 500ms (monitoreo crítico en tiempo real)
+      //   Parado    → 4s   (keep-alive, evita error E485 del VFD)
+      unsigned long intervaloHB = _motorGirandoUlt ? INTERVALO_HB_MARCHA : INTERVALO_HB_REPOSO;
+      if (!isBusy() && (millis() - _ultimaComunicacion >= intervaloHB)) {
         vlog(F("Heartbeat keep-alive..."));
         _master.readHoldingRegisters(SLAVE_ID, REG_STATUS_BASE, READ_COUNT);
         _esperandoLectura   = true;
@@ -204,6 +225,14 @@ class VFDController {
           else if (enMarcha)          estado = "EN MARCHA FWD";
           else if (apagado)           estado = "PARADO";
           else                        estado = "STANDBY";
+
+          // --- Guardar telemetría completa para publicación MQTT ---
+          _freqSalida      = frecuencia;                       // ya calculado: reg[2]/100
+          _freqConfigurada = res.getRegister(1) / SCALE_FREQ;  // 2102H
+          _corriente       = res.getRegister(3) / 10.0f;       // 2104H
+          _vBus            = res.getRegister(4) / 10.0f;       // 2105H
+          _vSalida         = res.getRegister(5) / 10.0f;       // 2106H
+          _estadoStr       = estado;
 
           // Estado normal: solo en verbose; FALLA: siempre visible
           if (enFallo || !_esHeartbeat || _verbose) {

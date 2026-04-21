@@ -114,6 +114,7 @@ void setup() {
              MQTT_TOPIC_IN, MQTT_TOPIC_OUT, MQTT_ID_PLC);
   mqtt.setLogger(printLog);
   mqtt.vincularGrupo(&grupo);
+  mqtt.vincularVFD(&vfd, "techo_1");
   mqtt.setCommandCallback(onComandoMqtt);
 
   printLog(F("Inicializacion completa."));

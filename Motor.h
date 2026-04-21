@@ -827,15 +827,23 @@ class Motor {
       if (pulsosActuales < pulsosObjetivo) {
         buscandoBajar = false;
         vfdAtras();
-        motorEnMovimiento = true;
-        sentidoGiro = -1;
-        moviendoAutomatico = true;
+        motorEnMovimiento      = true;
+        sentidoGiro            = -1;
+        moviendoAutomatico     = true;
+        // Reiniciar watchdog: sin esto la gracia de 1000ms ya estaba expirada
+        // desde el movimiento anterior y el watchdog disparaba al primer ciclo.
+        tiempoInicioMovimiento = millis();
+        lastMoveTime           = millis();
+        lastPosCheck           = pulsosActuales;
       } else if (pulsosActuales > pulsosObjetivo) {
         buscandoBajar = true;
         vfdAdelante();
-        motorEnMovimiento = true;
-        sentidoGiro = 1;
-        moviendoAutomatico = true;
+        motorEnMovimiento      = true;
+        sentidoGiro            = 1;
+        moviendoAutomatico     = true;
+        tiempoInicioMovimiento = millis();
+        lastMoveTime           = millis();
+        lastPosCheck           = pulsosActuales;
       } else {
         debug(F("Ya en posicion destino exacta."));
         ultimoObjetivoPctDebug = -1;

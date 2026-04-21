@@ -1,0 +1,45 @@
+[
+  {
+    "id": "22f83bcf5cb347a3",
+    "type": "function",
+    "z": "21610b7093002f0a",
+    "name": "Preparar VFD para WS",
+    "func": "if (typeof msg.payload !== 'string') {\n    msg.payload = JSON.stringify(msg.payload);\n}\n// Guardar en caché de flujo para enviarlo al primer cliente que se conecte\nflow.set('vfdCache', msg.payload);\nreturn msg;",
+    "outputs": 1,
+    "timeout": "",
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 500,
+    "y": 780,
+    "wires": [["4f364199441da3bf"]]
+  },
+  {
+    "id": "vfd_ws_in_sync_01",
+    "type": "websocket in",
+    "z": "21610b7093002f0a",
+    "name": "WS VFD ← App (sync)",
+    "server": "vfd_ws_listener_01",
+    "client": "",
+    "x": 270,
+    "y": 860,
+    "wires": [["vfd_sync_handler_fn"]]
+  },
+  {
+    "id": "vfd_sync_handler_fn",
+    "type": "function",
+    "z": "21610b7093002f0a",
+    "name": "Enviar caché VFD al conectar",
+    "func": "// El cliente Angular envía {\"type\":\"sync\"} justo al abrir el WebSocket\n// para pedir el último dato VFD sin esperar al siguiente ciclo de polling.\n// msg._session identifica al cliente concreto: el websocket out lo usará\n// para enviarle la respuesta solo a él (no broadcast).\ntry {\n    var req = JSON.parse(msg.payload);\n    if (req.type !== 'sync') return null;  // ignorar mensajes que no sean sync\n} catch(e) {\n    return null;  // payload no es JSON válido\n}\n\nvar cache = flow.get('vfdCache');\nif (!cache) {\n    // Aún no hay ningún dato del VFD — el cliente recibirá el primero\n    // cuando el PLC publique en el topic MQTT normalmente.\n    return null;\n}\n\n// Responder solo al cliente que preguntó (msg._session intacto)\nmsg.payload = cache;\nreturn msg;",
+    "outputs": 1,
+    "timeout": "",
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 530,
+    "y": 860,
+    "wires": [["4f364199441da3bf"]]
+  }
+]
