@@ -1,0 +1,18 @@
+[
+  {
+    "id": "22e6ad2aa7f55c11",
+    "type": "function",
+    "z": "21610b7093002f0a",
+    "name": "Traductor App -> PLC (Techo)",
+    "func": "var order = msg.payload.order;\nvar data  = msg.payload.data;\nvar commandToSend = '';\n\n// --- Movimiento calibrado (respeta límites de posición) ---\nif      (order === 'open')  { commandToSend = 'a'; }\nelse if (order === 'close') { commandToSend = 'z'; }\nelse if (order === 'stop')  { commandToSend = 's'; }\nelse if (order === 'goto') {\n    if (data !== undefined && data !== null) {\n        commandToSend = 'm' + data;\n    } else {\n        node.warn('Comando GOTO recibido sin datos');\n        return null;\n    }\n}\n\n// --- Movimiento libre (sin límites — panel admin) ---\nelse if (order === 'openFree')  { commandToSend = 'u'; }\nelse if (order === 'closeFree') { commandToSend = 'd'; }\n\n// --- Reset de errores del variador ---\nelse if (order === 'resetVfd') { commandToSend = 'R'; }\n\n// --- Anticipación de freno (pulsos) ---\nelse if (order === 'anticipacion') {\n    if (data !== undefined && data !== null) {\n        commandToSend = 'A' + data;\n    } else {\n        node.warn('Comando anticipacion recibido sin datos');\n        return null;\n    }\n}\n\n// --- Calibración manual paso a paso ---\nelse if (order === 'calibrar')     { commandToSend = 'c'; }\nelse if (order === 'setZero')      { commandToSend = '0'; }\nelse if (order === 'set100')       { commandToSend = '1'; }\nelse if (order === 'finCalibrado') { commandToSend = 'f'; }\n\nelse {\n    node.warn('Orden desconocida: ' + order);\n    return null;\n}\n\nmsg.payload = commandToSend;\nmsg.retain  = false;\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 730,
+    "y": 180,
+    "wires": [["23e5560520a49f0a"]]
+  }
+]

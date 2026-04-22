@@ -39,6 +39,7 @@ class MqttHandler {
 
     GrupoMotores*  _grupoVigilado = nullptr;
     VFDController* _vfdVigilado   = nullptr;
+    Motor*         _motorVigilado = nullptr;
     String         _vfdMotorId    = "motor_1";  // identificador del motor en el JSON
 
     // Configuración
@@ -182,6 +183,7 @@ class MqttHandler {
     void setLogger(LogCallback callback)       { externalLog    = callback; }
     void setCommandCallback(CommandCallback cb){ commandCallback = cb; }
     void vincularGrupo(GrupoMotores* g)        { _grupoVigilado = g; }
+    void vincularMotor(Motor* m)               { _motorVigilado = m; }
     void vincularVFD(VFDController* v, const char* motorId = "motor_1") {
       _vfdVigilado = v;
       _vfdMotorId  = motorId;
@@ -304,6 +306,9 @@ class MqttHandler {
       json += "\"estado\":\""   + estado + "\",";
       json += "\"falla\":"      + String(falla)      + ",";
       json += "\"falla_txt\":\"" + nombre_falla + "\"";
+      if (_motorVigilado) {
+        json += ",\"anticipacion\":" + String(_motorVigilado->getAnticipacion());
+      }
       json += "}";
 
       client.publish(MQTT_TOPIC_VFD, json.c_str());

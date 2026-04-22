@@ -577,6 +577,8 @@ class Motor {
       debug("Anticipacion: " + String(pulsosAnticipacion) + " pulsos");
     }
 
+    long getAnticipacion() const { return pulsosAnticipacion; }
+
     void setModo(bool esTiempo) {
       if (modoTiempo == esTiempo) return;
       parar();

@@ -58,6 +58,15 @@ void ejecutarComando(String cmd, GrupoMotores* grupo, bool esRemoto = false) {
   else if (c == 's') {
     grupo->parar();
   }
+  // Movimiento libre (sin límites de calibración) — desde panel de admin
+  // 'u' = up free  → abrirManual()  (ignora posición, respeta seta y error VFD)
+  // 'd' = down free → cerrarManual() (ignora posición, respeta seta y error VFD)
+  else if (c == 'u') {
+    grupo->abrirManual();
+  }
+  else if (c == 'd') {
+    grupo->cerrarManual();
+  }
   // Comandos con valor numérico (ej: "m50", "A30")
   else if (cmd.length() > 1) {
     int val = cmd.substring(1).toInt();

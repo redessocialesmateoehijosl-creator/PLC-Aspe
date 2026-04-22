@@ -115,6 +115,7 @@ void setup() {
   mqtt.setLogger(printLog);
   mqtt.vincularGrupo(&grupo);
   mqtt.vincularVFD(&vfd, "techo_1");
+  mqtt.vincularMotor(m1);
   mqtt.setCommandCallback(onComandoMqtt);
 
   printLog(F("Inicializacion completa."));
