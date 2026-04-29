@@ -293,19 +293,22 @@ class MqttHandler {
 
       // Construir JSON sin ArduinoJson (ahorra RAM en Mega)
       // Formato: {"motor":"techo_1","freq_sal":45.50,"freq_cfg":50.00,"corriente":3.2,
-      //           "v_bus":540.0,"v_sal":380.0,
-      //           "estado":"EN MARCHA FWD","falla":0,"falla_txt":"OK"}
-      String nombre_falla = (falla == 0) ? "OK" : _vfdVigilado->diagnosticoCompleto(falla).nombre;
+      //           "v_bus":540.0,"v_sal":380.0,"estado":"EN MARCHA FWD",
+      //           "falla":0,"falla_txt":"OK","falla_det":""}
+      InfoError infoFalla    = _vfdVigilado->diagnosticoCompleto(falla);
+      String nombre_falla    = (falla == 0) ? "OK" : infoFalla.nombre;
+      String detalle_falla   = (falla == 0) ? ""   : infoFalla.detalle;
       String json = "{";
-      json += "\"motor\":\""    + _vfdMotorId + "\",";
-      json += "\"freq_sal\":"   + String(freqSal, 2) + ",";
-      json += "\"freq_cfg\":"   + String(freqCfg, 2) + ",";
-      json += "\"corriente\":"  + String(corr,    1) + ",";
-      json += "\"v_bus\":"      + String(vBus,    1) + ",";
-      json += "\"v_sal\":"      + String(vSal,    1) + ",";
-      json += "\"estado\":\""   + estado + "\",";
-      json += "\"falla\":"      + String(falla)      + ",";
-      json += "\"falla_txt\":\"" + nombre_falla + "\"";
+      json += "\"motor\":\""     + _vfdMotorId   + "\",";
+      json += "\"freq_sal\":"    + String(freqSal, 2) + ",";
+      json += "\"freq_cfg\":"    + String(freqCfg, 2) + ",";
+      json += "\"corriente\":"   + String(corr,    1) + ",";
+      json += "\"v_bus\":"       + String(vBus,    1) + ",";
+      json += "\"v_sal\":"       + String(vSal,    1) + ",";
+      json += "\"estado\":\""    + estado        + "\",";
+      json += "\"falla\":"       + String(falla)  + ",";
+      json += "\"falla_txt\":\"" + nombre_falla  + "\",";
+      json += "\"falla_det\":\"" + detalle_falla + "\"";
       if (_motorVigilado) {
         json += ",\"anticipacion\":" + String(_motorVigilado->getAnticipacion());
       }

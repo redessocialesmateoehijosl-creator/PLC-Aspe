@@ -48,7 +48,20 @@ class VFDController {
 
     // --- FALLA ACTIVA DEL VARIADOR ---
     bool          _hayFalla              = false;  // true = variador en estado de falla
-    uint16_t      _faultCode             = 0;      // 0 = sin falla; 1-17 = código activo
+    uint16_t      _faultCode             = 0;      // 0 = sin falla; 1-14 = código activo (manual)
+
+    // Antirrebote de falla: se requieren 2 lecturas consecutivas con el mismo
+    // código para declarar falla real. Evita falsos positivos por ruido RS485
+    // o estados de transición (arranque de rampa) donde el variador devuelve
+    // brevemente un valor sin Bit10 que cae dentro del rango 1-14.
+    uint8_t       _faultConsecutivo      = 0;      // contador de lecturas con falla
+    uint16_t      _faultCandidato        = 0;      // último código candidato
+    static const uint8_t FAULT_CONFIRM_MIN = 2;    // lecturas consecutivas para confirmar
+
+    // --- FRECUENCIA PENDIENTE AL ARRANQUE ---
+    // Se envía tras la primera comunicación Modbus exitosa
+    bool          _freqPendienteOK       = false;
+    float         _freqPendiente         = 0.0f;
 
     // --- TELEMETRÍA: últimos valores leídos (registros 2101H-2106H) ---
     float    _freqSalida      = 0.0;   // Hz  (2103H, 2 decimales)
@@ -82,7 +95,15 @@ class VFDController {
     // --- Falla activa del variador ---
     bool     hayFalla()       { return _hayFalla;   }
     uint16_t getCodigoFalla() { return _faultCode;  }
-    void     limpiarFalla()   { _hayFalla = false; _faultCode = 0; }
+    void     limpiarFalla()   { _hayFalla = false; _faultCode = 0; _faultConsecutivo = 0; _faultCandidato = 0; }
+
+    // --- Frecuencia pendiente al arranque ---
+    // Motor::begin() llama esto al arrancar con la frecuencia guardada en EEPROM.
+    // Se enviará automáticamente tras la primera respuesta Modbus válida.
+    void setFreqPendiente(float hz) {
+      _freqPendiente   = hz;
+      _freqPendienteOK = false;  // pendiente de enviar
+    }
 
     // --- Telemetría: getters de los últimos valores leídos ---
     float  getFreqSalida()      { return _freqSalida;      }
@@ -123,6 +144,21 @@ class VFDController {
       _ultimaComunicacion = millis();
     }
 
+    // Establece la consigna de frecuencia en el variador vía Modbus (registro 2001H).
+    // hz: frecuencia deseada en Hz (0.0 a FREQ_MAX_HZ).
+    // El registro espera el valor como porcentaje×100 de la frecuencia máxima:
+    //   valor = (hz / FREQ_MAX_HZ) × 10000   →   50Hz = 10000, 25Hz = 5000
+    // Requiere que el VFD esté configurado con fuente de frecuencia = RS485 (P0.01).
+    void setFrecuencia(float hz) {
+      if (isBusy()) { vlog(F("Bus ocupado, ignorando setFrecuencia")); return; }
+      if (hz < 0.0f)          hz = 0.0f;
+      if (hz > FREQ_MAX_HZ)   hz = FREQ_MAX_HZ;
+      uint16_t regVal = (uint16_t)((hz / FREQ_MAX_HZ) * 10000.0f + 0.5f);  // +0.5 para redondeo
+      vlog(">> TX FC06 REG_FREQ_SET=" + String(regVal) + " (" + String(hz, 1) + "Hz)");
+      _master.writeSingleRegister(SLAVE_ID, REG_FREQ_SET, regVal);
+      _ultimaComunicacion = millis();
+    }
+
     // Inyecta una falla externa (para pruebas). El variador detiene el motor.
     // Para limpiarla después: enviar resetErrores()
     void forzarFallaExterna() {
@@ -157,9 +193,9 @@ class VFDController {
       }
 
       // Heartbeat: intervalo dinámico según estado del motor
-      //   En marcha → 500ms (monitoreo crítico en tiempo real)
-      //   Parado    → 4s   (keep-alive, evita error E485 del VFD)
-      unsigned long intervaloHB = _motorGirandoUlt ? INTERVALO_HB_MARCHA : INTERVALO_HB_REPOSO;
+      //   En marcha o falla activa → 200ms (monitoreo crítico)
+      //   Parado sin falla → 2s (keep-alive, evita error E485 del VFD)
+      unsigned long intervaloHB = (_motorGirandoUlt || _hayFalla) ? INTERVALO_HB_MARCHA : INTERVALO_HB_REPOSO;
       if (!isBusy() && (millis() - _ultimaComunicacion >= intervaloHB)) {
         vlog(F("Heartbeat keep-alive..."));
         _master.readHoldingRegisters(SLAVE_ID, REG_STATUS_BASE, READ_COUNT);
@@ -182,37 +218,44 @@ class VFDController {
         }
 
       } else {
-        // Respuesta de lectura (FC03)
+        // Respuesta de lectura (FC03) — bloque 2100H-2106H
         if (!res.hasError()) {
-          uint16_t statusReg  = res.getRegister(0);
-          float    frecuencia = res.getRegister(2) / SCALE_FREQ;
+          // ── Extraer registros del bloque ─────────────────────────────────
+          // reg[IDX_FAULT=0]    = 2100H → código de falla (0 = sin falla)
+          // reg[IDX_STATUS=1]   = 2101H → bits de estado operativo
+          // reg[IDX_FREQ_CFG=2] = 2102H → frecuencia configurada
+          // reg[IDX_FREQ_SAL=3] = 2103H → frecuencia de salida
+          // reg[IDX_CORR=4]     = 2104H → corriente
+          // reg[IDX_VBUS=5]     = 2105H → voltaje bus DC
+          // reg[IDX_VSAL=6]     = 2106H → voltaje salida
+          uint16_t faultCode = res.getRegister(IDX_FAULT);
+          uint16_t statusReg = res.getRegister(IDX_STATUS);
+          float    frecuencia = res.getRegister(IDX_FREQ_SAL) / SCALE_FREQ;
 
-          // Interpretación según manual registro 2101H:
-          // Bit1  (0x0002) = Apagado         → motor detenido
-          // Bit3  (0x0008) = Avance           → dirección FWD seleccionada (puede activo sin girar)
-          // Bit4  (0x0010) = Reversa          → dirección REV seleccionada
-          // Bit10 (0x0400) = Canal Modbus     → comandos vía RS485 activos
-          // Bit12 (0x1000) = En funcionamiento→ motor girando realmente
-          // Detección de falla: cuando el variador está en falla, 2101H devuelve
-          // el código de falla directamente (1-17), sin bits altos activos.
-          // En operación normal, Bit10 (0x0400, Canal Modbus) SIEMPRE está activo,
-          // lo que permite distinguir sin ambigüedad un código de falla del estado normal.
-          // Ejemplo: 0x0002 = "Apagado" (normal, Bit10 no aplica aún si apagado vía local),
-          //          pero en modo Modbus, un valor puro 2 sin Bit10 = "Sobretensión" (falla).
-          bool enFallo  = (statusReg > 0 && statusReg <= 17 && !(statusReg & 0x0400));
-          uint16_t faultCode = enFallo ? statusReg : 0;
+          // ── Detección de falla: directa desde 2100H ──────────────────────
+          // El registro 2100H contiene el código de falla activa (1-17).
+          // Permanece con el código hasta que se envía Reset (2002H=0x0002).
+          // Valor 0 = sin falla. No requiere antirrebote: el registro es estable.
+          bool enFallo = (faultCode > 0);
 
-          bool apagado      = !enFallo && (statusReg & 0x0002);
-          bool enFwd        = !enFallo && (statusReg & 0x0008);
-          bool enRev        = !enFallo && (statusReg & 0x0010);
-          bool enMarcha     = !enFallo && (statusReg & 0x1000);
-          bool canalModbus  = (statusReg & 0x0400);
+          // Limpiar candidato/contadores del antirrebote (ya no necesarios)
+          _faultConsecutivo = 0;
+          _faultCandidato   = 0;
 
-          bool enMovimiento = !enFallo && (bool)enMarcha;
+          // ── Estado operativo desde 2101H ─────────────────────────────────
+          // Bit1  (0x0002) = Apagado (motor detenido)
+          // Bit3  (0x0008) = Avance (dirección FWD)
+          // Bit4  (0x0010) = Reversa (dirección REV)
+          // Bit10 (0x0400) = Canal Modbus activo
+          // Bit12 (0x1000) = En funcionamiento (motor girando)
+          bool apagado     = (statusReg & 0x0002);
+          bool enFwd       = (statusReg & 0x0008);
+          bool enRev       = (statusReg & 0x0010);
+          bool enMarcha    = (statusReg & 0x1000);
+          bool canalModbus = (statusReg & 0x0400);
 
-          // Exponer estado para consulta externa:
-          //   motorGirando()  → Motor::update() lo usa para confirmar parada real
-          //   hayFalla()      → Motor::verificarAtasco() para diagnosticar causa
+          bool enMovimiento = enMarcha && !enFallo;
+
           _motorGirandoUlt       = enMovimiento;
           _motorApagadoUlt       = apagado;
           _tsUltimaLecturaEstado = millis();
@@ -226,27 +269,34 @@ class VFDController {
           else if (apagado)           estado = "PARADO";
           else                        estado = "STANDBY";
 
-          // --- Guardar telemetría completa para publicación MQTT ---
-          _freqSalida      = frecuencia;                       // ya calculado: reg[2]/100
-          _freqConfigurada = res.getRegister(1) / SCALE_FREQ;  // 2102H
-          _corriente       = res.getRegister(3) / 10.0f;       // 2104H
-          _vBus            = res.getRegister(4) / 10.0f;       // 2105H
-          _vSalida         = res.getRegister(5) / 10.0f;       // 2106H
+          // ── Telemetría completa para MQTT ─────────────────────────────────
+          _freqSalida      = frecuencia;
+          _freqConfigurada = res.getRegister(IDX_FREQ_CFG) / SCALE_FREQ;
+          _corriente       = res.getRegister(IDX_CORR)     / 10.0f;
+          _vBus            = res.getRegister(IDX_VBUS)     / 10.0f;
+          _vSalida         = res.getRegister(IDX_VSAL)     / 10.0f;
           _estadoStr       = estado;
 
-          // Estado normal: solo en verbose; FALLA: siempre visible
+          // ── Log ───────────────────────────────────────────────────────────
           if (enFallo || !_esHeartbeat || _verbose) {
-            vlog("<< 2101H=0x" + String(statusReg, HEX) +
-                 " | Freq=" + String(frecuencia) + "Hz" +
+            vlog("<< 2100H=" + String(faultCode) +
+                 " 2101H=0x" + String(statusReg, HEX) +
+                 " | Freq=" + String(frecuencia, 1) + "Hz" +
                  " | " + estado +
                  (!enFallo && canalModbus ? " | [Modbus]" : ""));
           }
 
-          // Fallo: SIEMPRE visible, independientemente del verbose
           if (enFallo) {
             InfoError info = obtenerInfoError(faultCode);
             debug("!!! FALLA VARIADOR cod:" + String(faultCode) +
                   " — " + info.nombre + " — " + info.detalle);
+          }
+
+          // Primera comunicación exitosa: restaurar frecuencia guardada en EEPROM
+          if (!_freqPendienteOK && !enFallo) {
+            _freqPendienteOK = true;
+            debug(">> Comunicacion OK. Restaurando frecuencia: " + String(_freqPendiente, 1) + "Hz");
+            setFrecuencia(_freqPendiente);
           }
 
         } else {

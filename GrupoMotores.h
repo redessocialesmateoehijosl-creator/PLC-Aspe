@@ -138,6 +138,11 @@ class GrupoMotores {
       for (int i = 0; i < numMotores; i++) motores[i]->setAnticipacion(valor);
     }
 
+    void setFrecuenciaVFD(float hz) {
+      debug("[GRUPO CFG] Frecuencia VFD: " + String(hz, 1) + "Hz");
+      for (int i = 0; i < numMotores; i++) motores[i]->setFrecuenciaVFD(hz);
+    }
+
     void setModo(bool esTiempo) {
       debug(String(F("[GRUPO CFG] Modo: ")) + (esTiempo ? "TIEMPO" : "ENCODER"));
       for (int i = 0; i < numMotores; i++) motores[i]->setModo(esTiempo);
@@ -150,6 +155,11 @@ class GrupoMotores {
     void resetErroresVFD() {
       debug(F("[GRUPO CMD] >> RESET ERRORES VFD"));
       for (int i = 0; i < numMotores; i++) motores[i]->resetErroresVFD();
+    }
+
+    void forzarFallaExterna() {
+      debug(F("[GRUPO TEST] >> FALLA EXTERNA (cod.6) — usar R para limpiar"));
+      for (int i = 0; i < numMotores; i++) motores[i]->forzarFallaExterna();
     }
 
     // --------------------------------------------------------

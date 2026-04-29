@@ -28,6 +28,7 @@
 //  A<N>    → Ajustar anticipación del freno (N pulsos, ej: A30)
 //  i       → Imprimir estado por Serial
 //  M       → Activar/desactivar verbose MQTT (diagnóstico)
+//  F<N>    → Fijar frecuencia del VFD en N Hz (ej: F50, F40, F35). Rango: 0-50Hz.
 //  R       → Reset de errores del variador VFD
 // ============================================================
 
@@ -45,6 +46,14 @@ void ejecutarComando(String cmd, GrupoMotores* grupo, bool esRemoto = false) {
   else if (c == 'f') { grupo->finCalibrado(); return; }
   else if (c == 'i') { grupo->imprimirEstado(); return; }
   else if (c == 'R') { grupo->resetErroresVFD(); return; }
+  else if (c == 'X') { grupo->forzarFallaExterna(); return; }  // TEST: inyecta falla externa (cod.6). Limpiar con R.
+  else if (c == 'F') {
+    // Formato: F50 = 50Hz, F40 = 40Hz, F35 = 35Hz (entero o decimal, ej: F47.5)
+    // Rango válido: 0 – FREQ_MAX_HZ (50Hz). El VFD_Control lo limita internamente.
+    float hz = cmd.substring(1).toFloat();
+    grupo->setFrecuenciaVFD(hz);
+    return;
+  }
 
   // --- Comandos de movimiento ---
   if (c == 'a') {

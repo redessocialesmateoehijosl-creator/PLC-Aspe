@@ -4,6 +4,13 @@
 //  Hardware:   1 Motor Techo (sin Roll-Ups)
 //  Conexion:   Ethernet (cable) — sin WiFi
 // ============================================================
+//  VERSION: 2
+//  Historial de cambios:
+//    v1 — Versión inicial
+//    v2 — VFD_Control.h: detección de falla corregida (rango 1-14
+//         según manual + antirrebote 2 lecturas consecutivas)
+//         para eliminar falsos error_vdf
+// ============================================================
 
 #include <Arduino.h>
 #include <RS485.h>

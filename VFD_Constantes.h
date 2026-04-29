@@ -10,9 +10,30 @@ const uint16_t SERIAL_CONFIG  = SERIAL_8E1;
 
 // --- REGISTROS MODBUS ---
 const uint16_t REG_CONTROL     = 0x2000; // Comando de control (marcha/parada)
+const uint16_t REG_FREQ_SET    = 0x2001; // Consigna de frecuencia por comunicación (0-10000 = 0-100% de FREQ_MAX_HZ)
 const uint16_t REG_FAULT_CMD   = 0x2002; // Comando de falla externa y reset
-const uint16_t REG_STATUS_BASE = 0x2101; // Primer registro de lectura documentado
-const uint16_t READ_COUNT      = 6;      // 2101H-2106H: estado, freq_cfg, freq_sal, corriente, bus, tension
+const uint16_t REG_STATUS_BASE = 0x2100; // Bloque de lectura confirmado: empieza en 2100H
+const uint16_t READ_COUNT      = 7;      // 2100H-2106H: falla, estado, freq_cfg, freq_sal, corriente, bus, tension
+
+// --- ÍNDICES DENTRO DEL BLOQUE DE LECTURA (offset desde 2100H) ---
+// reg[0] = 2100H → código de falla activa (0 = sin falla)
+// reg[1] = 2101H → estado operativo (bits Run/Stop/Dir)
+// reg[2] = 2102H → frecuencia configurada (÷100 Hz)
+// reg[3] = 2103H → frecuencia de salida   (÷100 Hz)
+// reg[4] = 2104H → corriente de salida    (÷10 A)
+// reg[5] = 2105H → voltaje bus DC         (÷10 V)
+// reg[6] = 2106H → voltaje de salida      (÷10 V)
+const uint8_t  IDX_FAULT      = 0;
+const uint8_t  IDX_STATUS     = 1;
+const uint8_t  IDX_FREQ_CFG   = 2;
+const uint8_t  IDX_FREQ_SAL   = 3;
+const uint8_t  IDX_CORR       = 4;
+const uint8_t  IDX_VBUS       = 5;
+const uint8_t  IDX_VSAL       = 6;
+
+// --- FRECUENCIA MÁXIMA DEL VARIADOR ---
+// Debe coincidir con el parámetro P0.03 configurado en el VFD físico.
+const float    FREQ_MAX_HZ     = 50.0;   // Hz — estándar europeo 50Hz
 
 // --- VALORES DE COMANDO (Registro 2000H) ---
 const uint16_t CMD_STOP       = 0x0001;

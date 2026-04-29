@@ -51,7 +51,8 @@ const char* PREFIJO_POS       = "pos ";
 #define EEP_TIMETOTAL   10
 #define EEP_POSTIME     14
 #define EEP_ANTIENC     18
-#define EEP_BLOCK_SIZE  22
+#define EEP_FREQ_HZ     22   // float, 4 bytes — frecuencia VFD guardada (Hz)
+#define EEP_BLOCK_SIZE  26
 #define EEP_MAGIC_VAL   ((byte)0xA5)
 
 struct DatosMotor {
@@ -233,6 +234,16 @@ class Motor {
       unsigned long v; EEPROM.get(eepBase + offset, v); return v;
     }
     void eepPutULong(int offset, unsigned long val) {
+      eepMarcarInit(); EEPROM.put(eepBase + offset, val);
+    }
+    float eepGetFloat(int offset, float def) {
+      if (!eepInitializado()) return def;
+      float v; EEPROM.get(eepBase + offset, v);
+      // Sanidad: si el valor no es un float válido, devolver defecto
+      if (isnan(v) || v < 0.0f || v > 999.0f) return def;
+      return v;
+    }
+    void eepPutFloat(int offset, float val) {
       eepMarcarInit(); EEPROM.put(eepBase + offset, val);
     }
 
@@ -566,9 +577,30 @@ class Motor {
       }
     }
 
+    void forzarFallaExterna() {
+      if (vfd) vfd->forzarFallaExterna();
+    }
+
+    void setFrecuenciaVFD(float hz) {
+      if (vfd) {
+        vfd->setFrecuencia(hz);
+        eepPutFloat(EEP_FREQ_HZ, hz);
+        debug(">> VFD: Consigna frecuencia " + String(hz, 1) + "Hz enviada y guardada.");
+      } else {
+        debug(F(">> VFD: no asignado, ignorando setFrecuencia."));
+      }
+    }
+
     void begin() {
       modoTiempo = eepGetBool(EEP_TIMEMODE, false);
       cargarDatosDeMemoria();
+      // Restaurar frecuencia VFD guardada — se enviará tras la primera
+      // comunicación Modbus exitosa (vfd->setFreqPendiente)
+      if (vfd) {
+        float freqGuardada = eepGetFloat(EEP_FREQ_HZ, 50.0f);
+        vfd->setFreqPendiente(freqGuardada);
+        debug(">> VFD: Frecuencia guardada=" + String(freqGuardada, 1) + "Hz — se enviara tras primera comm.");
+      }
     }
 
     void setAnticipacion(long pulsos) {
