@@ -231,6 +231,18 @@ class MqttHandler {
         return;
       }
 
+      // Speedtest: eco inmediato del payload → Node-RED mide RTT
+      if (topicStr == String(MQTT_TOPIC_SPTEST)) {
+        debug(">> SPEEDTEST recibido. Payload: \"" + msg + "\"");
+        if (client.connected() && Red::linkOK()) {
+          bool ok = client.publish(MQTT_TOPIC_SPPONG, msg.c_str());
+          debug(String(">> SPEEDTEST eco enviado a ") + MQTT_TOPIC_SPPONG + (ok ? " [OK]" : " [FALLO publish]"));
+        } else {
+          debug(F(">> SPEEDTEST eco OMITIDO (sin conexion o sin cable)"));
+        }
+        return;
+      }
+
       if (topicStr == String(_topicIn)) {
         lastPongTime = millis();
         debug("<< RX [" + topicStr + "] \"" + msg + "\"");
@@ -484,6 +496,7 @@ class MqttHandler {
       if (client.connect(_deviceId, _user, _pass, _topicOut, 1, true, MSG_OFFLINE)) {
         client.subscribe(_topicIn);
         client.subscribe(MQTT_TOPIC_PONG);
+        client.subscribe(MQTT_TOPIC_SPTEST);  // Speedtest: eco de latencia PLC
         // retain=true → Node-RED siempre sabe que el PLC está ONLINE aunque
         // se suscriba después de que el PLC arrancara.
         client.publish(_topicOut, MSG_ONLINE, true);

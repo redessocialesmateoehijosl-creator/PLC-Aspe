@@ -16,8 +16,12 @@ const char* MQTT_TOPIC_OUT    = "/D83BDA6FB8DC/return";
 const char* MQTT_TOPIC_VFD    = "/D83BDA6FB8DC/vfd";    // Telemetría del variador (JSON)
 
 // Topics — heartbeat
-const char* MQTT_TOPIC_PING   = "/D83BDA6FB8DC/ping";   // PLC → Node-RED
-const char* MQTT_TOPIC_PONG   = "/D83BDA6FB8DC/pong";   // Node-RED → PLC
+const char* MQTT_TOPIC_PING   = "/D83BDA6FB8DC/ping";        // PLC → Node-RED
+const char* MQTT_TOPIC_PONG   = "/D83BDA6FB8DC/pong";        // Node-RED → PLC
+
+// Topics — speedtest (Opción 1: analizador de conectividad)
+const char* MQTT_TOPIC_SPTEST = "/D83BDA6FB8DC/speedtest";   // Node-RED → PLC (ping)
+const char* MQTT_TOPIC_SPPONG = "/D83BDA6FB8DC/speedtest/pong"; // PLC → Node-RED (eco)
 
 // --- CONFIGURACIÓN DE HEARTBEAT (Latido) ---
 // Tiempos en modo REPOSO (Lento para no saturar la red)

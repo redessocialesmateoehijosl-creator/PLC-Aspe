@@ -41,6 +41,15 @@ class VFDController {
     // nunca se pierda por un heartbeat o lectura en curso.
     bool          _stopPendiente      = false;
 
+    // Cola para comandos RUN (misma lógica que STOP):
+    // Si marchaAdelante()/marchaAtras() se llaman con el bus ocupado,
+    // el comando se encola y se despacha en cuanto el bus quede libre.
+    // El STOP tiene prioridad: si se encola un STOP, cancela el RUN pendiente.
+    // Sin esta cola, el primer comando de marcha se pierde silenciosamente
+    // y el watchdog del encoder dispara un falso error_vfd 2.5s después.
+    bool          _runPendiente       = false;
+    uint16_t      _runPendienteCmd    = 0;     // CMD_RUN_FWD o CMD_RUN_REV
+
     // --- FEEDBACK ESTADO MOTOR (último parse válido de 2101H) ---
     bool          _motorGirandoUlt       = false;  // Bit12 "En funcionamiento"
     bool          _motorApagadoUlt       = false;  // Bit1  "Apagado"
@@ -113,23 +122,36 @@ class VFDController {
     float  getVSalida()         { return _vSalida;         }
     String getEstadoStr()       { return _estadoStr;       }
 
-    // --- COMANDOS (comprueban bus libre antes de enviar) ---
+    // --- COMANDOS (con cola si el bus está ocupado) ---
     void marchaAdelante() {
-      if (isBusy()) { vlog(F("Bus ocupado, ignorando marchaAdelante")); return; }
+      _runPendiente    = true;
+      _runPendienteCmd = CMD_RUN_FWD;
+      if (isBusy()) {
+        vlog(F("Bus ocupado. RUN_FWD encolado: se enviara en el proximo ciclo libre."));
+        return;
+      }
       vlog(F(">> TX FC06 REG_CONTROL=0x0012 (RUN_FWD)"));
+      _runPendiente = false;
       _master.writeSingleRegister(SLAVE_ID, REG_CONTROL, CMD_RUN_FWD);
       _ultimaComunicacion = millis();
     }
 
     void marchaAtras() {
-      if (isBusy()) { vlog(F("Bus ocupado, ignorando marchaAtras")); return; }
+      _runPendiente    = true;
+      _runPendienteCmd = CMD_RUN_REV;
+      if (isBusy()) {
+        vlog(F("Bus ocupado. RUN_REV encolado: se enviara en el proximo ciclo libre."));
+        return;
+      }
       vlog(F(">> TX FC06 REG_CONTROL=0x0022 (RUN_REV)"));
+      _runPendiente = false;
       _master.writeSingleRegister(SLAVE_ID, REG_CONTROL, CMD_RUN_REV);
       _ultimaComunicacion = millis();
     }
 
     void parar() {
-      _stopPendiente = true;   // marca siempre, incluso si el bus está ocupado
+      _stopPendiente = true;    // marca siempre, incluso si el bus está ocupado
+      _runPendiente  = false;   // STOP cancela cualquier RUN pendiente
       if (isBusy()) {
         vlog(F("Bus ocupado. STOP encolado: se enviara en el proximo ciclo libre."));
         return;
@@ -182,14 +204,27 @@ class VFDController {
     // --------------------------------------------------------
     void update() {
 
-      // ── PRIORIDAD MÁXIMA: STOP encolado ──────────────────────────────
+      // ── PRIORIDAD 1: STOP encolado ───────────────────────────────────
       // Si parar() fue llamado mientras el bus estaba ocupado, enviamos
       // el STOP en cuanto el bus queda libre, ANTES que cualquier otra
       // operación (heartbeat, lectura de estado…).
       if (_stopPendiente && !isBusy()) {
-        vlog(F(">> [COLA] Enviando STOP prioritario encolado."));   // vlog: solo en verbose
+        vlog(F(">> [COLA] Enviando STOP prioritario encolado."));
         _enviarStopAhora();
         return;   // procesar la respuesta en el próximo ciclo
+      }
+
+      // ── PRIORIDAD 2: RUN encolado ────────────────────────────────────
+      // Si marchaAdelante()/marchaAtras() fueron llamados con el bus ocupado,
+      // el comando quedó en cola. Lo despachamos aquí en cuanto el bus queda
+      // libre. Sin esto, el primer arranque se pierde silenciosamente y el
+      // watchdog del encoder declara un falso error_vfd 2.5s después.
+      if (_runPendiente && !isBusy()) {
+        vlog(">> [COLA] Enviando RUN encolado (cmd=0x" + String(_runPendienteCmd, HEX) + ")");
+        _runPendiente = false;
+        _master.writeSingleRegister(SLAVE_ID, REG_CONTROL, _runPendienteCmd);
+        _ultimaComunicacion = millis();
+        return;
       }
 
       // Heartbeat: intervalo dinámico según estado del motor
@@ -232,15 +267,33 @@ class VFDController {
           uint16_t statusReg = res.getRegister(IDX_STATUS);
           float    frecuencia = res.getRegister(IDX_FREQ_SAL) / SCALE_FREQ;
 
-          // ── Detección de falla: directa desde 2100H ──────────────────────
+          // ── Detección de falla con antirrebote (2100H) ───────────────────
           // El registro 2100H contiene el código de falla activa (1-17).
-          // Permanece con el código hasta que se envía Reset (2002H=0x0002).
-          // Valor 0 = sin falla. No requiere antirrebote: el registro es estable.
-          bool enFallo = (faultCode > 0);
-
-          // Limpiar candidato/contadores del antirrebote (ya no necesarios)
-          _faultConsecutivo = 0;
-          _faultCandidato   = 0;
+          // Se requieren FAULT_CONFIRM_MIN lecturas consecutivas con el mismo
+          // código ≠ 0 para declarar falla real. Esto evita falsos positivos
+          // por ruido RS485 o transitorios al arranque de rampa del VFD.
+          // Una vez que el VFD está en falla real el registro es estable y
+          // el antirrebote se confirma rápidamente (2 × 200ms = 400ms).
+          bool enFallo;
+          if (faultCode > 0) {
+            if (faultCode == _faultCandidato) {
+              if (_faultConsecutivo < FAULT_CONFIRM_MIN) _faultConsecutivo++;
+            } else {
+              _faultCandidato   = faultCode;
+              _faultConsecutivo = 1;
+            }
+            enFallo = (_faultConsecutivo >= FAULT_CONFIRM_MIN);
+            if (!enFallo) {
+              vlog("Falla candidata cod:" + String(faultCode) +
+                   " (" + String(_faultConsecutivo) + "/" + String(FAULT_CONFIRM_MIN) +
+                   " lecturas) — esperando confirmacion");
+            }
+          } else {
+            // Sin falla: resetear antirrebote
+            _faultConsecutivo = 0;
+            _faultCandidato   = 0;
+            enFallo           = false;
+          }
 
           // ── Estado operativo desde 2101H ─────────────────────────────────
           // Bit1  (0x0002) = Apagado (motor detenido)

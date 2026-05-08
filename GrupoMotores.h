@@ -213,7 +213,8 @@ class GrupoMotores {
       bool alguienErrorLim   = false;
       bool alguienNoCal      = false;
       bool alguienCalibrando = false;
-      bool alguienMoviendo   = false;
+      bool alguienAbriendo   = false;
+      bool alguienCerrando   = false;
       int  contAbiertos      = 0;
       int  contCerrados      = 0;
 
@@ -225,7 +226,8 @@ class GrupoMotores {
         if (s == MSG_ERROR_LIMITE) alguienErrorLim   = true;
         if (s == MSG_NO_CALIBRADO) alguienNoCal      = true;
         if (s == MSG_CALIBRANDO)   alguienCalibrando = true;
-        if (s == MSG_ABRIENDO || s == MSG_CERRANDO) alguienMoviendo = true;
+        if (s == MSG_ABRIENDO)     alguienAbriendo   = true;
+        if (s == MSG_CERRANDO)     alguienCerrando   = true;
         if (s == MSG_ABIERTO) contAbiertos++;
         if (s == MSG_CERRADO) contCerrados++;
       }
@@ -236,7 +238,8 @@ class GrupoMotores {
       if (alguienErrorLim)   return String(MSG_ERROR_LIMITE);
       if (alguienNoCal)      return String(MSG_NO_CALIBRADO);
       if (alguienCalibrando) return String(MSG_CALIBRANDO);
-      if (alguienMoviendo)   return String(MSG_ABRIENDO);
+      if (alguienAbriendo)   return String(MSG_CERRANDO);
+      if (alguienCerrando)   return String(MSG_ABRIENDO);
       if (numMotores > 0 && contAbiertos == numMotores) return String(MSG_ABIERTO);
       if (numMotores > 0 && contCerrados == numMotores) return String(MSG_CERRADO);
       return String(MSG_PARADO);
